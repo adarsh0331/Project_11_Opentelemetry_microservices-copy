@@ -1,32 +1,23 @@
-# Currency Service
+# Shipping Service
 
-The Currency Service does the conversion from one currency to another.
-It is a C++ based service.
+The Shipping service queries `quote` for price quote, provides tracking IDs,
+and the impression of order fulfillment & shipping processes.
 
-## Building docker image
+## Local
 
-To build the currency service, run the following from root directory
-of opentelemetry-demo
+This repo assumes you have rust 1.73 installed. You may use docker, or install
+rust [here](https://www.rust-lang.org/tools/install).
 
-```sh
-docker-compose build currency
-```
+## Build
 
-## Run the service
-
-Execute the below command to run the service.
+From `../../`, run:
 
 ```sh
-docker-compose up currency
+docker compose build shipping
 ```
 
-## Run the client
-
-currencyclient is a sample client which sends some request to currency
-service. To run the client, execute the below command.
+## Test
 
 ```sh
-docker exec -it <container_name> currencyclient 7000
+cargo test
 ```
-
-'7000' is port where currency listens to.
