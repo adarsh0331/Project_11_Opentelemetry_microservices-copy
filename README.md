@@ -1,41 +1,32 @@
-# Ad Service
+# Currency Service
 
-The Ad service provides advertisement based on context keys. If no context keys
-are provided then it returns random ads.
+The Currency Service does the conversion from one currency to another.
+It is a C++ based service.
 
-## Building Locally
+## Building docker image
 
-The Ad service requires at least JDK 17 to build and uses gradlew to
-compile/install/distribute. Gradle wrapper is already part of the source code.
-To build Ad Service, run:
-
-```sh
-./gradlew installDist
-```
-
-It will create an executable script
-`src/ad/build/install/oteldemo/bin/Ad`.
-
-To run the Ad Service:
+To build the currency service, run the following from root directory
+of opentelemetry-demo
 
 ```sh
-export AD_PORT=8080
-export FEATURE_FLAG_GRPC_SERVICE_ADDR=featureflagservice:50053
-./build/install/opentelemetry-demo-ad/bin/Ad
+docker-compose build currency
 ```
 
-### Upgrading Gradle
+## Run the service
 
-If you need to upgrade the version of gradle then run
+Execute the below command to run the service.
 
 ```sh
-./gradlew wrapper --gradle-version <new-version>
+docker-compose up currency
 ```
 
-## Building Docker
+## Run the client
 
-From the root of `opentelemetry-demo`, run:
+currencyclient is a sample client which sends some request to currency
+service. To run the client, execute the below command.
 
 ```sh
-docker build --file ./src/ad/Dockerfile ./
+docker exec -it <container_name> currencyclient 7000
 ```
+
+'7000' is port where currency listens to.
