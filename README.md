@@ -1,3 +1,6 @@
+<img width="1431" height="766" alt="image" src="https://github.com/user-attachments/assets/7e47a6d5-2346-4f98-b86f-a184980dc8e9" />
+
+
 # open_telemetry_microservices
 
 # Jenkins Installation on Ubuntu
