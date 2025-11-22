@@ -21,9 +21,9 @@ Open Telemetry supports many popular programming languages including:
 
 ## Micro Services Architecture
 
-This architecture illustrates a microservices-based e-commerce architecture using various communication protocols (mainly gRPC, HTTP, and TCP), and integrates tools like Kafka, Envoy, Valkey, and Flagd for key functionalities.
+<img width="1166" height="1044" alt="image" src="https://github.com/user-attachments/assets/9ce5f0d0-c669-4a5a-a941-07c3937bed42" />
 
-(Note: The original PDF includes a service diagram. In Markdown, this can be described or linked to an image if available.)
+This architecture illustrates a microservices-based e-commerce architecture using various communication protocols (mainly gRPC, HTTP, and TCP), and integrates tools like Kafka, Envoy, Valkey, and Flagd for key functionalities.
 
 ### Top Layer – Entry Points & Proxy
 - Internet, Load Generator, React Native App
