@@ -220,7 +220,7 @@ sudo systemctl restart jenkins
 
 ### Step 2: Configure Branch Source
 - Choose GitHub
-- Add repository URL: https://github.com/jadalaramani/open_telemetry_microservices_CI.git
+- Add repository URL: (https://github.com/adarsh0331/Project_11_Opentelemetry_microservices.git)
 - Add GitHub credentials (if private)
 - Jenkins will scan all branches and create jobs for each branch with a Jenkinsfile
 
@@ -235,7 +235,7 @@ pipeline {
             steps {
                 script {
                     withDockerRegistry(credentialsId: 'docker-cred', toolName: 'docker') {
-                        sh "docker build -t ramanijadala/frontend:latest ."
+                        sh "docker build -t adarshbarkunta/frontend:latest ."
                     }
                 }
             }
@@ -244,7 +244,7 @@ pipeline {
             steps {
                 script {
                     withDockerRegistry(credentialsId: 'docker-cred', toolName: 'docker') {
-                        sh "docker push ramanijadala/frontend:latest "
+                        sh "docker push adarshbarkunta/frontend:latest "
                     }
                 }
             }
