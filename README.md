@@ -9,6 +9,7 @@ This project contains the Open Telemetry Astronomy Shop, a microservice-based di
 - Build a base for vendors, tooling authors, and others to extend and demonstrate their OpenTelemetry integrations.
 - Create a living example for OpenTelemetry contributors to use for testing new versions of the API, SDK, and other components or enhancements.
 
+
 ### Supported Languages
 Open Telemetry supports many popular programming languages including:
 - Python
