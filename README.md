@@ -203,75 +203,56 @@ terraform apply
 - EKS cluster in AWS Console
 - Nodes are in Ready state
 
-## Argocd Installation:
+## CD: ArgoCD (only deployment path — points at this repo)
+
+This repo is the single source of truth ArgoCD watches. The GitOps loop is:
+
+**CI builds an image → CI commits the new tag into [deployment-service.yml](deployment-service.yml) on `main` → ArgoCD notices the commit and auto-syncs the cluster.**
+
+No manual `kubectl apply` and no `helm install` — ArgoCD is the only thing that ever touches the cluster.
+
+> **Current image state**: `deployment-service.yml` still points at the official upstream images (`ghcr.io/open-telemetry/demo:1.12.0-*`) until the CI pipeline has completed at least one successful build+push (see [CI: GitHub Actions](#ci-github-actions) — needs `DOCKERHUB_TOKEN` set). So the very first ArgoCD sync deploys the known-good upstream images; your own `adarshbarkunta/<service>` images only replace them once CI has actually verified they build and pushed successfully. Watch the Actions run to confirm each service builds before expecting to see your own images running.
+
+### 1. Install ArgoCD
 ```bash
 kubectl create namespace argocd
 kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argocd/stable/manifests/install.yaml
 kubectl get pods -n argocd
-kubectl get svc -n argocd
-kubectl edit svc argocd-server -n argocd            # change type: LoadBalancer
-kubectl get svc -n argocd
+kubectl edit svc argocd-server -n argocd    # change type: ClusterIP -> LoadBalancer
+kubectl get svc -n argocd                   # note the LoadBalancer external IP
 ```
 
-Take the LoadBalancer ip and access it in web
-
+Get the initial admin password:
 ```bash
-kubectl get secrets -n argocd
-kubectl edit secret argocd-initial-admin-secret -n argocd
-echo RDg3ZjNUaDg3S3ZmTDhpbw== | base64 –decode         # -------Replace it with ur secret
+kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d
 ```
+Username: `admin`
 
-Username :  admin
+### 2. Create the Application (points at THIS repo)
+Via the Web UI (`http://<ARGOCD_LOADBALANCER_IP>`) or `argocd` CLI, create an app with:
+- **Application Name**: `opentelemetry-demo`
+- **Project**: `default`
+- **Repository URL**: `https://github.com/adarsh0331/Project_11_Opentelemetry_microservices-copy.git`
+- **Revision**: `HEAD` (tracks `main`)
+- **Path**: `.` (repo root — `deployment-service.yml` is the only manifest there)
+- **Cluster URL**: `https://kubernetes.default.svc`
+- **Namespace**: `ms`
+- **Sync Policy**: enable **Auto-Sync** (+ **Auto-Create Namespace**) — this is what makes CI's image-tag commits actually redeploy without you touching anything
 
-Password : <Your passaword>
-
-## Create Application via Web UI
-1. Open Argo CD Web UI (e.g., http://<ARGOCD_SERVER>:80)
-2. Login with username/password
-3. Click “New App”
-4. Fill the form:
-   - Application Name: opentelemetry-demo
-   - Project: default
-   - Repository URL: https://github.com/open-telemetry/opentelemetry-demo.git
-   - Revision: HEAD
-   - Path: Kubernetes/complete
-   - Cluster URL: https://kubernetes.default.svc
-   - Namespace: argocd
-5. Enable Auto-Sync if you want Argo CD to automatically apply changes
-6. Click Create
-
-To access the application in the web change frontend-proxy cluster ip to LoadBalancer
-
-## Prometheus & Grafana & Jaeger :
-
-### Helm installation:
+Equivalent CLI form:
 ```bash
-wget https://get.helm.sh/helm-v3.17.2-linux-amd64.tar.gz
-tar -xvf helm-v3.17.2-linux-amd64.tar.gz
-sudo mv linux-amd64/helm /usr/local/bin/helm
+argocd app create opentelemetry-demo \
+  --repo https://github.com/adarsh0331/Project_11_Opentelemetry_microservices-copy.git \
+  --revision main \
+  --path . \
+  --dest-server https://kubernetes.default.svc \
+  --dest-namespace ms \
+  --sync-policy automated \
+  --auto-prune --self-heal
 ```
 
-Add OpenTelemetry Helm repository:
-```bash
-helm repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts
-```
+### 3. Access the app
+Change the `frontend-proxy` Service to `LoadBalancer` (either edit it directly with `kubectl edit svc frontend-proxy -n ms`, or update its `type:` in `deployment-service.yml` and let ArgoCD sync the change), then hit that LoadBalancer's external IP.
 
-To install the chart with the release name my-otel-demo:
-```bash
-helm install my-otel-demo open-telemetry/opentelemetry-demo
-```
-
-TAKE THE FRONTEND-PROXY LOAD-BALANCER IP AND ACCESS PROMETHEUS & GRAFANA IN WEB
-
-## CD: Deploying to Kubernetes
-
-[deployment-service.yml](deployment-service.yml) holds the rendered Kubernetes manifests (Deployments + Services) for all 18 services. Once you have a cluster and `kubectl` context configured:
-
-```bash
-kubectl create namespace ms
-kubectl apply -n ms -f deployment-service.yml
-kubectl get pods -n ms
-kubectl get svc -n ms
-```
-
-Update the image references in `deployment-service.yml` to `adarshbarkunta/<service>:latest` (or a specific `:<git-sha>` tag from a GitHub Actions run) to deploy the images built by CI. A GitHub Actions-based deploy job (targeting a live cluster via a `KUBE_CONFIG` secret) can be added here once a cluster is available.
+### Observability (optional, separate ArgoCD app)
+`deployment-service.yml` does **not** include Prometheus/Grafana/Jaeger. To add them, create a second ArgoCD Application (Helm source) pointing at `https://open-telemetry.github.io/opentelemetry-helm-charts`, chart `opentelemetry-demo`, rather than running `helm install` by hand — keeps everything under ArgoCD.
