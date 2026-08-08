@@ -890,7 +890,7 @@ spec:
             - name: config-rw
               mountPath: /etc/flagd
         - name: flagdui
-          image: 'adarshbarkunta/flagd-ui:95365e0a0ca1fa78fc824b8afdeedcbcc2a23d2f'
+          image: 'adarshbarkunta/flagd-ui:b29ffeefd8f8f26d35d79facf5232d17450e73c2'
           imagePullPolicy: IfNotPresent
           ports:
             
