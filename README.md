@@ -116,19 +116,32 @@ This architecture illustrates a microservices-based e-commerce architecture usin
 
 This repo is a **monorepo**: every microservice lives under `src/<service>/` on `main`, each with its own `Dockerfile`. There are 18 services; 17 are built as custom images, and `flagd` runs from the upstream `ghcr.io/open-feature/flagd` image (only its config, `src/flagd/demo.flagd.json`, lives here).
 
-## CI: GitHub Actions (Build & Push)
+## CI: GitHub Actions
 
-[.github/workflows/build-and-push.yml](.github/workflows/build-and-push.yml) replaces the old Jenkins Multibranch setup. On every push to `main` that touches `src/**`, it:
-1. Detects which service(s) changed (via `dorny/paths-filter`, diffing against the previous commit).
-2. Builds only those services in a matrix job, each with its own explicit `context`/`dockerfile` pair (several services — `cart`, `accounting` — have their Dockerfile nested a level deeper, so this is set per-service rather than assumed).
-3. Pushes `docker.io/adarshbarkunta/<service>:latest` and `:<git-sha>` to Docker Hub, using Buildx layer caching (`cache-from`/`cache-to: type=gha`) to keep rebuilds fast.
+[.github/workflows/build-and-push.yml](.github/workflows/build-and-push.yml) is the primary CI pipeline. On every push to `main` that touches `src/**` (or via manual **Run workflow** dispatch, which builds all 17 services), it runs a matrix job **per changed service** with these stages:
 
-You can also trigger a full rebuild of all 17 services manually via the **Run workflow** button (`workflow_dispatch`) — useful for the first run, since there's no previous commit to diff against.
+1. **Checkout** — `actions/checkout@v4`.
+2. **SonarQube Scan** — `SonarSource/sonarqube-scan-action`, scoped to that service's `src/<service>` dir. Wired against `SONAR_HOST_URL`/`SONAR_TOKEN` secrets; `continue-on-error: true` so it doesn't block the pipeline until a real server is configured.
+3. **Build & Push** — Buildx build using each service's own `context`/`dockerfile` pair (several — `cart`, `accounting` — have it nested a level deeper). Pushes `docker.io/adarshbarkunta/<service>:latest` and `:<git-sha>`, with GHA layer caching.
+4. **Trivy Vulnerability Scan** — scans the image just pushed; report-only (`exit-code: 0`, never blocks), results uploaded to the repo's **Security → Code scanning** tab.
+5. **Update deployment-service.yml** — rewrites that service's `image:` line to the newly pushed tag and commits/pushes back to `main` (GitOps). Since matrix jobs run in parallel, this step retries with a rebase on push conflicts.
 
 ### Required repo secrets
 Set these under **Settings → Secrets and variables → Actions**:
-- `DOCKERHUB_USERNAME` — Docker Hub username/namespace images are pushed under.
+- `DOCKERHUB_USERNAME` — Docker Hub username/namespace images are pushed under. *(already set)*
 - `DOCKERHUB_TOKEN` — a Docker Hub [access token](https://hub.docker.com/settings/security) (not your account password).
+- `SONAR_HOST_URL` / `SONAR_TOKEN` — your SonarQube server URL and auth token. Until these are set, the scan step just no-ops.
+
+## CI: Jenkins (alternative)
+
+[Jenkinsfile](Jenkinsfile) implements the same five stages for a Jenkins pipeline job pointed at this repo's `main` branch. It auto-detects which `src/<service>` directories changed since the last commit (or accepts an explicit `SERVICES_OVERRIDE` build parameter) and loops through: SonarQube scan → Docker build & push → Trivy scan → `deployment-service.yml` update, per service. Sonar-scanner and Trivy run as Docker containers, so nothing extra needs installing on the Jenkins agent beyond Docker itself.
+
+Jenkins credentials required (**Manage Jenkins → Credentials**):
+- `docker-cred` (Username/password) — Docker Hub push access.
+- `github-cred` (Username/password: GitHub username + PAT with repo write access) — pushes the `deployment-service.yml` update back to `main`.
+- `sonar-token` (Secret text) — SonarQube auth token.
+
+And a `SONAR_HOST_URL` global environment variable (**Manage Jenkins → System**) pointing at your SonarQube server.
 
 ## Eks setup in Ubuntu server using Terraform
 
