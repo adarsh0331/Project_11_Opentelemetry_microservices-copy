@@ -67,7 +67,7 @@ jobs:
             dockerfile: src/ad/Dockerfile
             imageSuffix: adservice
           - service: cart
-            context: src/cart
+            context: src/cart/src
             dockerfile: src/cart/src/Dockerfile
             imageSuffix: cartservice
           - service: checkout

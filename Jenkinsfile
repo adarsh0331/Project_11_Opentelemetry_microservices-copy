@@ -17,7 +17,7 @@
 def SERVICES = [
     accounting       : [context: 'src/accounting',        dockerfile: 'src/accounting/Dockerfile',        imageSuffix: 'accountingservice'],
     ad               : [context: 'src/ad',                dockerfile: 'src/ad/Dockerfile',                imageSuffix: 'adservice'],
-    cart             : [context: 'src/cart',               dockerfile: 'src/cart/src/Dockerfile',          imageSuffix: 'cartservice'],
+    cart             : [context: 'src/cart/src',           dockerfile: 'src/cart/src/Dockerfile',          imageSuffix: 'cartservice'],
     checkout         : [context: 'src/checkout',           dockerfile: 'src/checkout/Dockerfile',          imageSuffix: 'checkoutservice'],
     currency         : [context: 'src/currency',           dockerfile: 'src/currency/Dockerfile',          imageSuffix: 'currencyservice'],
     email            : [context: 'src/email',               dockerfile: 'src/email/Dockerfile',             imageSuffix: 'emailservice'],
