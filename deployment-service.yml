@@ -1431,7 +1431,7 @@ spec:
       serviceAccountName: opentelemetry-demo
       containers:
         - name: paymentservice
-          image: 'ghcr.io/open-telemetry/demo:1.12.0-paymentservice'
+          image: 'adarshbarkunta/payment:95365e0a0ca1fa78fc824b8afdeedcbcc2a23d2f'
           imagePullPolicy: IfNotPresent
           ports:
             
