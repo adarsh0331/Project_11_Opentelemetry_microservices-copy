@@ -1127,7 +1127,7 @@ spec:
       serviceAccountName: opentelemetry-demo
       containers:
         - name: frontendproxy
-          image: 'ghcr.io/open-telemetry/demo:1.12.0-frontendproxy'
+          image: 'adarshbarkunta/frontend-proxy:95365e0a0ca1fa78fc824b8afdeedcbcc2a23d2f'
           imagePullPolicy: IfNotPresent
           ports:
             
