@@ -171,7 +171,7 @@ jobs:
       # Report-only (exit-code 0): scans the freshly built image but never blocks the push,
       # per team decision. Results still land in the repo's Security tab.
       - name: Trivy Vulnerability Scan
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: ${{ secrets.DOCKERHUB_USERNAME }}/${{ matrix.service }}:${{ github.sha }}
           format: sarif
