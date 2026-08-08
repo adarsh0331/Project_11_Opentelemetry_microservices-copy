@@ -112,151 +112,23 @@ This architecture illustrates a microservices-based e-commerce architecture usin
 - Integrates easily with tools like Prometheus, Grafana, and Jaeger.
 - Supports both manual and automatic instrumentation.
 
-## 1. Provisioning EC2 Instance
+## Repository Layout
 
-### Step 1: Launch EC2
-- Choose Ubuntu 22.04 LTS
-- Instance type: t2.xlarge is a chargeable instance type. Be cautious — make sure to stop or resize it to t2.micro after your practice session to avoid incurring unnecessary charges.
-- Open ports in security group:
-  - SSH: 22
-  - HTTP: 80
-  - Jenkins: 8080
-  - All port
+This repo is a **monorepo**: every microservice lives under `src/<service>/` on `main`, each with its own `Dockerfile`. There are 18 services; 17 are built as custom images, and `flagd` runs from the upstream `ghcr.io/open-feature/flagd` image (only its config, `src/flagd/demo.flagd.json`, lives here).
 
-### Step 2: Connect to Jenkins EC2 server
-```bash
-ssh -i your-key.pem ubuntu@your-ec2-ip
-```
+## CI: GitHub Actions (Build & Push)
 
-## 2. Install Java (Required by Jenkins)
-```bash
-sudo apt update
-sudo apt install -y openjdk-17-jdk
-java -version
-```
+[.github/workflows/build-and-push.yml](.github/workflows/build-and-push.yml) replaces the old Jenkins Multibranch setup. On every push to `main` that touches `src/**`, it:
+1. Detects which service(s) changed (via `dorny/paths-filter`, diffing against the previous commit).
+2. Builds only those services in a matrix job, each with its own explicit `context`/`dockerfile` pair (several services — `cart`, `accounting` — have their Dockerfile nested a level deeper, so this is set per-service rather than assumed).
+3. Pushes `docker.io/adarshbarkunta/<service>:latest` and `:<git-sha>` to Docker Hub, using Buildx layer caching (`cache-from`/`cache-to: type=gha`) to keep rebuilds fast.
 
-## 3. Install Jenkins
+You can also trigger a full rebuild of all 17 services manually via the **Run workflow** button (`workflow_dispatch`) — useful for the first run, since there's no previous commit to diff against.
 
-### Step 1: Add Jenkins Repository
-```bash
-curl -fsSL https://pkg.jenkins.io/debian-stable/jenkins.io-2023.key | sudo tee \
-  /usr/share/keyrings/jenkins-keyring.asc > /dev/null
-echo deb [signed-by=/usr/share/keyrings/jenkins-keyring.asc] \
-  https://pkg.jenkins.io/debian-stable binary/ | sudo tee \
-  /etc/apt/sources.list.d/jenkins.list > /dev/null
-```
-
-### Step 2: Install Jenkins
-```bash
-sudo apt update
-sudo apt install -y jenkins
-```
-
-### Step 3: Start and Enable Jenkins
-```bash
-sudo systemctl start jenkins
-sudo systemctl enable jenkins
-```
-
-### Step 4: Access Jenkins UI
-Go to: http://<your-ec2-ip>:8080
-
-Get the admin password:
-```bash
-sudo cat /var/lib/jenkins/secrets/initialAdminPassword
-```
-
-## 4. Install Jenkins Plugins
-Go to Manage Jenkins → Manage Plugins → Install the following plugins:
-- Docker Pipeline
-- Kubernetes
-- Pipeline
-- Blue Ocean (optional)
-- Docker
-- Kubernetes cli
-- Kubernetes credentials
-
-➢ In the tool session add docker installation from dockerhub
-
-## 5. Configure Docker
-```bash
-sudo apt-get update
-sudo apt-get install ca-certificates curl
-sudo install -m 0755 -d /etc/apt/keyrings
-sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
-sudo chmod a+r /etc/apt/keyrings/docker.asc
-echo \
-  "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu \
-  $(. /etc/os-release && echo "${UBUNTU_CODENAME:-$VERSION_CODENAME}") stable" | \
-  sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
-sudo apt-get update
-sudo apt-get install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin -y
-sudo chmod 666 /var/run/docker.sock
-```
-
-### Step 2: Add Jenkins User to Docker Group
-```bash
-sudo usermod -aG docker jenkins
-sudo systemctl restart jenkins
-```
-
-## 6. Configure Docker Credentials in Jenkins
-
-### Step1: Store Docker Credentials in Jenkins
-1. Go to Jenkins Dashboard → Manage Jenkins → Credentials
-2. Select (global) domain
-3. Click Add Credentials
-   - Kind: Username with password
-   - Username: DockerHub username
-   - Password: password
-   - ID: docker-cred
-   - Description: Docker Hub Credentials
-
-## 8. Create Multibranch Pipeline
-
-### Step 1: Create a New Multibranch Pipeline Job
-- Go to Jenkins Dashboard → New Item
-- Name: my-multibranch-job
-- Type: Multibranch Pipeline
-
-### Step 2: Configure Branch Source
-- Choose GitHub
-- Add repository URL: (https://github.com/adarsh0331/Project_11_Opentelemetry_microservices.git)
-- Add GitHub credentials (if private)
-- Jenkins will scan all branches and create jobs for each branch with a Jenkinsfile
-
-## 9. Example Jenkinsfile (for Docker builds)
-Create a Jenkinsfile in your GitHub repo root:
-```groovy
-pipeline {
-    agent any
-
-    stages {
-        stage('Build & Tag Docker Image') {
-            steps {
-                script {
-                    withDockerRegistry(credentialsId: 'docker-cred', toolName: 'docker') {
-                        sh "docker build -t adarshbarkunta/frontend:latest ."
-                    }
-                }
-            }
-        }      
-        stage('Push Docker Image') {
-            steps {
-                script {
-                    withDockerRegistry(credentialsId: 'docker-cred', toolName: 'docker') {
-                        sh "docker push adarshbarkunta/frontend:latest "
-                    }
-                }
-            }
-        }    
-    }
-}
-```
-
-## 10. Verify Setup
-- Push a new branch with a Jenkinsfile. Jenkins automatically creates and runs a pipeline for it
-- Docker image should be built and pushed to Docker Hub
+### Required repo secrets
+Set these under **Settings → Secrets and variables → Actions**:
+- `DOCKERHUB_USERNAME` — Docker Hub username/namespace images are pushed under.
+- `DOCKERHUB_TOKEN` — a Docker Hub [access token](https://hub.docker.com/settings/security) (not your account password).
 
 ## Eks setup in Ubuntu server using Terraform
 
@@ -273,7 +145,7 @@ Complete terraform files to create EKS in AWS VPC is available in the eks-instal
 - Jenkinfile: Jenkins file to trigger pipeline
 - outputs.tf: Output values you wish to see post terraform execution, For example - VPC ID.
 
-### Connect to Jenkins EC2 Server
+### Connect to your provisioning EC2 server
 ```bash
 ssh -i your-key.pem ubuntu@your-ec2-ip
 ```
@@ -307,51 +179,16 @@ eksctl version
 ### AWS Configure
 Provide your AWS Access Key, Secret Key, region, and output format.
 
-## Storing AWS Access & Secret Keys in Jenkins Using Secret Text
-
-### Step 1: Add AWS Credentials as Secret Text
-1. Go to your Jenkins Dashboard
-2. Navigate to: Manage Jenkins ➝ Credentials ➝ (global) ➝ Add Credentials
-
-### Step 2: Add 1st Credential (AWS Access Key)
-- Kind: Secret text
-- Secret: <your AWS access key>
-- ID: aws-access-key
-- Description: AWS Access Key
-
-Click OK
-
-### Add 2nd Credential (AWS Secret Key)
-- Kind: Secret text
-- Secret: <your AWS secret key>
-- ID: aws-secret-key
-- Description: AWS Secret Access Key
-
-Click OK
-
-## Setup Jenkins Pipeline
-A. Go to Jenkins ➝ New Item ➝ Pipeline
-
-B. Choose “Pipeline” and name it
-
-C. In the pipeline config, choose:
-- Pipeline script from SCM
-- SCM: Git
-- Repository URL: https://github.com/adarsh0331/Project_10_Eks_Cluster_with_terraform.git
-- Script Path: Jenkinsfile
-
-## Trigger the Pipeline
-Click “Build Now” in Jenkins to provision the EKS cluster.
+### Provision the cluster
+From the `eks-install` folder of the [Terraform repo](https://github.com/adarsh0331/Project_10_Eks_Cluster_with_terraform.git):
+```bash
+terraform init
+terraform apply
+```
 
 ### Check:
 - EKS cluster in AWS Console
 - Nodes are in Ready state
-- Jenkins console output shows public IPs and cluster status
-
-### Connect to Jenkins EC2 server
-```bash
-ssh -i your-key.pem ubuntu@your-ec2-ip
-```
 
 ## Argocd Installation:
 ```bash
@@ -413,163 +250,15 @@ helm install my-otel-demo open-telemetry/opentelemetry-demo
 
 TAKE THE FRONTEND-PROXY LOAD-BALANCER IP AND ACCESS PROMETHEUS & GRAFANA IN WEB
 
-## Extra don’t care
+## CD: Deploying to Kubernetes
 
-### Eks setup in Ubuntu server
-
-#### #AWS CLI Installation
-```bash
-curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
-sudo apt install unzip
-unzip awscliv2.zip
-sudo ./aws/install
-aws configure
-```
-
-#### #Kubectl Installations
-```bash
-curl -o kubectl https://amazon-eks.s3.us-west-2.amazonaws.com/1.19.6/2021-01-05/bin/linux/amd64/kubectl
-chmod +x ./kubectl
-sudo mv ./kubectl /usr/local/bin
-kubectl version --short --client
-```
-
-#### #Eksctl installation
-```bash
-curl --silent --location "https://github.com/weaveworks/eksctl/releases/latest/download/eksctl_$(uname -s)_amd64.tar.gz" | tar xz -C /tmp
-sudo mv /tmp/eksctl /usr/local/bin
-eksctl version
-```
-
-#### # Create cluster
-```bash
-eksctl create cluster mycluster
-```
-
-## 11. Kubernetes Deployment with RBAC (CD Setup)
-
-### Step 1: Create RBAC for Jenkins in Kubernetes
-Apply the following YAML to create a ServiceAccount, ClusterRole, and ClusterRoleBinding for Jenkins:
-
-```yaml
-#kubectl create namespace ms
-
-#serviceaccount
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: jenkins
-  namespace: ms
-
-#Role
-apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
-metadata:
-  name: app-role
-  namespace: ms
-rules:
-  - apiGroups:
-      - ""
-      - apps
-      - autoscaling
-      - batch
-      - extensions
-      - policy
-      - rbac.authorization.k8s.io
-    resources:
-      - pods
-      - componentstatuses
-      - configmaps
-      - daemonsets
-      - deployments
-      - events
-      - endpoints
-      - horizontalpodautoscalers
-      - ingress
-      - jobs
-      - limitranges
-      - namespaces
-      - nodes
-      - pods
-      - persistentvolumes
-      - persistentvolumeclaims
-      - resourcequotas
-      - replicasets
-      - replicationcontrollers
-      - serviceaccounts
-      - services
-    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-
-#Role binding
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata:
-  name: app-rolebinding
-  namespace: ms
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: Role
-  name: app-role
-subjects:
-- namespace: ms
-  kind: ServiceAccount
-  name: jenkins
-
-#secret
-apiVersion: v1
-kind: Secret
-type: kubernetes.io/service-account-token
-metadata:
-  name: mysecretname
-  annotations:
-    kubernetes.io/service-account.name: myserviceaccount
-```
-
-Apply the YAML:
-```bash
-kubectl apply -f rbac.yaml
-```
+[deployment-service.yml](deployment-service.yml) holds the rendered Kubernetes manifests (Deployments + Services) for all 18 services. Once you have a cluster and `kubectl` context configured:
 
 ```bash
-kubectl -n ms describe secret mysecretname
+kubectl create namespace ms
+kubectl apply -n ms -f deployment-service.yml
+kubectl get pods -n ms
+kubectl get svc -n ms
 ```
 
-### Step 2: Get the Token for Jenkins Authentication
-Note down the token — you will use this in Jenkins.
-
-### Step 3: Add Kubeconfig or Token to Jenkins Credentials
-In Jenkins:
-- Go to Manage Jenkins → Credentials → Global → Add Credentials
-  - Kind: Secret text
-  - Secret: (Paste the token from above)
-  - ID: k8s-cred
-  - Description: Kubernetes Cluster Token for CD
-
-### Step 5: Update Jenkinsfile for CD Deployment
-```groovy
-pipeline {
-    agent any
-
-    stages {
-        stage('Deploy To Kubernetes') {
-            steps {
-                   withKubeConfig(caCertificate: '', clusterName: 'eks', contextName: '', credentialsId: 'k8s-cred', namespace: 'ms', restrictKubeConfigAccess: false, serverUrl: 'https://B775572DFEC747C548A81ADFA31189DC.gr7.us-east-1.eks.amazonaws.com') {
-                    sh "kubectl apply -f deployment-service.yml"
-                     
-                }
-            }
-        }
-             
-        stage('verify Deployment') {
-            steps {
-                  withKubeConfig(caCertificate: '', clusterName: 'eks', contextName: '', credentialsId: 'k8s-cred', namespace: 'ms', restrictKubeConfigAccess: false, serverUrl: 'https://B775572DFEC747C548A81ADFA31189DC.gr7.us-east-1.eks.amazonaws.com') {   
-                  sh "kubectl get svc -n ms"
-                }
-            }
-        }
-    }
-}
-```
-### Step 6: Kubernetes Deployment YAML Example
-Link of deployment and service yaml file  
-https://github.com/jadalaramani/open_telemetry_microservices/blob/main/deployment-service.yml
+Update the image references in `deployment-service.yml` to `adarshbarkunta/<service>:latest` (or a specific `:<git-sha>` tag from a GitHub Actions run) to deploy the images built by CI. A GitHub Actions-based deploy job (targeting a live cluster via a `KUBE_CONFIG` secret) can be added here once a cluster is available.
