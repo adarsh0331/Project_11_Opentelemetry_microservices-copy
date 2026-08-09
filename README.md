@@ -135,11 +135,24 @@ The EKS control plane bills ~$0.10/hr regardless of node type, and `m7i-flex.lar
 
 ## CI Pipelines
 
-Two independent, equivalent pipelines — use whichever fits your setup. Both do the same five things: checkout → SonarQube scan → Docker build & push → Trivy scan → commit the new image tag into `deployment-service.yml` (which ArgoCD then picks up automatically).
+Two independent, equivalent pipelines — use whichever fits your setup.
 
 ### GitHub Actions
 
-[.github/workflows/build-and-push.yml](.github/workflows/build-and-push.yml) runs on every push to `main` that touches `src/**` (or via manual **Run workflow** dispatch, which builds all 17 services). One matrix job per changed service.
+[.github/workflows/build-and-push.yml](.github/workflows/build-and-push.yml) runs on every push to `main` that touches `src/**` (or via manual **Run workflow** dispatch, which builds all 17 services regardless of what changed).
+
+**Job structure — this is why the Actions UI looks like it's "just" `changes` + `build`:** GitHub Actions only shows *jobs* as top-level rows on a run's summary page. This workflow has exactly two jobs — `changes` (detects which services touched `src/**`) and `build` (one instance per changed service, run in parallel as a matrix). SonarQube, Trivy, and the manifest update are **steps inside each `build (<service>)` job**, not separate jobs — click into any `build (<service>)` row to see them. In execution order, per service:
+
+| # | Step | What it does |
+|---|---|---|
+| 1 | Checkout | `actions/checkout@v4` |
+| 2 | **SonarQube Scan** | `sonar-scanner` against the self-hosted server below, `continue-on-error: true` (report-only) |
+| 3 | Docker Buildx setup | `setup-qemu-action` + `setup-buildx-action` |
+| 4 | Docker Hub Login | `docker/login-action` |
+| 5 | **Build & Push** | builds that service's image, pushes `:latest` + `:<git-sha>` to Docker Hub |
+| 6 | **Trivy Vulnerability Scan** | scans the image just pushed, `exit-code: 0` (report-only) |
+| 7 | Upload Trivy results | SARIF → repo's **Security → Code scanning** tab |
+| 8 | **Update deployment-service.yml** | rewrites that service's `image:` line, commits + pushes to `main` (GitOps — ArgoCD picks this up automatically) |
 
 Required repo secrets (**Settings → Secrets and variables → Actions**):
 - `DOCKERHUB_USERNAME` / `DOCKERHUB_TOKEN` — Docker Hub push access ([access token](https://hub.docker.com/settings/security), not your password).
@@ -164,7 +177,24 @@ Each service scans as its own project, keyed `otel-demo-<service>` (matching the
 
 ### Jenkins (alternative)
 
-[Jenkinsfile](Jenkinsfile) implements the same stages for a Jenkins pipeline job pointed at `main`. Auto-detects changed `src/<service>` directories (or accepts an explicit `SERVICES_OVERRIDE` build parameter). SonarQube and Trivy run as Docker containers, so nothing extra needs installing on the agent beyond Docker itself.
+[Jenkinsfile](Jenkinsfile) implements the same pipeline for a Jenkins job pointed at `main`. Unlike GitHub Actions, Jenkins' Blue Ocean / stage view shows every stage below by name directly — no clicking into a job to find them. Top-level stages, in order:
+
+| # | Stage | What it does |
+|---|---|---|
+| 1 | `Checkout` | pulls `main` |
+| 2 | `Detect Changed Services` | diffs `src/<service>` dirs since the last commit, or uses the explicit `SERVICES_OVERRIDE` build parameter |
+| 3 | `Build, Scan & Deploy Services` | parent stage; per changed service, runs the four nested stages below |
+
+Nested per-service, repeated for each detected service:
+
+| # | Stage | What it does |
+|---|---|---|
+| 3a | `SonarQube: <service>` | `sonar-scanner` container against the self-hosted server below (`catchError` keeps it report-only) |
+| 3b | `Build & Push: <service>` | `docker build` + push via `withDockerRegistry` |
+| 3c | `Trivy Scan: <service>` | Trivy container scan |
+| 3d | `Update Manifest: <service>` | rewrites `deployment-service.yml`'s `image:` line, commits + pushes to `main` |
+
+SonarQube and Trivy run as Docker containers, so nothing extra needs installing on the agent beyond Docker itself.
 
 Jenkins credentials required (**Manage Jenkins → Credentials**):
 - `docker-cred` (Username/password) — Docker Hub push access.
