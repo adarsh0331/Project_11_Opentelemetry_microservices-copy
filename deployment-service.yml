@@ -969,7 +969,7 @@ spec:
       serviceAccountName: opentelemetry-demo
       containers:
         - name: frauddetectionservice
-          image: 'adarshbarkunta/fraud-detection:d2e502d8a80a3afa87e65673bad72b702dc26c4c'
+          image: 'adarshbarkunta/fraud-detection:9620fca48f4d3425d6a3dbab6b172fd822fe16bc'
           imagePullPolicy: IfNotPresent
           env:
             - name: OTEL_SERVICE_NAME
