@@ -143,7 +143,24 @@ Two independent, equivalent pipelines — use whichever fits your setup. Both do
 
 Required repo secrets (**Settings → Secrets and variables → Actions**):
 - `DOCKERHUB_USERNAME` / `DOCKERHUB_TOKEN` — Docker Hub push access ([access token](https://hub.docker.com/settings/security), not your password).
-- `SONAR_HOST_URL` / `SONAR_TOKEN` — until set, the scan step just no-ops (`continue-on-error: true`).
+- `SONAR_HOST_URL` / `SONAR_TOKEN` — already set, pointing at the self-hosted SonarQube server below. `continue-on-error: true` keeps this report-only regardless.
+
+### SonarQube server (self-hosted, EC2)
+SonarQube Community Edition runs as a single Docker container on its own EC2 instance (`sonarqube-server`, `m7i-flex.large`, tag `Name=sonarqube-server`) — kept off the EKS cluster deliberately since the cluster was already at 63-70% memory and SonarQube's Elasticsearch-backed indexer wants 2GB+ of headroom on its own.
+
+```bash
+# provisioned via SSM (no SSH key needed) - to check on it:
+aws ssm start-session --target <instance-id> --region us-east-1
+
+# the container itself:
+docker ps                 # container name: sonarqube, port 9000
+docker logs sonarqube
+```
+Bootstrap did three things beyond `docker run sonarqube:lts-community`: bumped `vm.max_map_count` (Elasticsearch bootstrap check requirement), rotated the default `admin/admin` password on first boot via the REST API, and generated a CI token — both stored only in the `SONAR_TOKEN` GitHub secret, never committed.
+
+Each service scans as its own project, keyed `otel-demo-<service>` (matching the `-Dsonar.projectKey` arg in the workflow) — browse them at `http://<instance-public-ip>:9000`. One gotcha specific to this setup: CI runs `sonar-scanner` directly against source, without a full compile step first, so Java services with raw `.java` files (only `ad`; `fraud-detection` is Kotlin and unaffected) need `-Dsonar.java.binaries=.` supplied as a placeholder or the scan hard-fails with `AnalysisException: ... please provide compiled classes`. Already added to both pipelines' scan args.
+
+> **Security note**: the instance's security group allows `9000`/`22` from `0.0.0.0/0` for demo convenience, matching this repo's other public endpoints (ArgoCD, frontend LB). Restrict to your IP if this stops being a throwaway demo. Costs the same as an EKS worker node (~$0.10/hr on `m7i-flex.large`) — terminate it when not in use: `aws ec2 terminate-instances --instance-ids <instance-id> --region us-east-1`.
 
 ### Jenkins (alternative)
 
@@ -215,7 +232,8 @@ Two separate issues surfaced after the observability stack had been running unde
 - **Prometheus OOM-crash-looping** (8 restarts in under an hour, worsening each time) — root cause was `resource_to_telemetry_conversion.enabled: true` on the collector's Prometheus exporter, which promotes *every* OTLP resource attribute into a Prometheus label on every metric. Under continuous varying traffic this caused unbounded time-series cardinality growth. Fixed: disabled that setting (not needed for the RED-metric dashboards this stack supports) and gave Prometheus headroom (1000Mi → 1500Mi) to recover cleanly.
 
 ### Cost reminder
-A live EKS cluster on `m7i-flex.large` nodes costs real money continuously (control plane + EC2, roughly a few dollars/day). Tear it down when not actively using it:
+A live EKS cluster on `m7i-flex.large` nodes costs real money continuously (control plane + EC2, roughly a few dollars/day), and the standalone SonarQube EC2 instance adds another `m7i-flex.large` on top of that. Tear both down when not actively using them:
 ```bash
 eksctl delete cluster --name otel-demo --region us-east-1
+aws ec2 terminate-instances --instance-ids <sonarqube-instance-id> --region us-east-1
 ```
