@@ -211,16 +211,17 @@ This repo is the single source of truth ArgoCD watches. The GitOps loop is:
 
 No manual `kubectl apply` and no `helm install` — ArgoCD is the only thing that ever touches the cluster.
 
-> **Current image state**: `deployment-service.yml` still points at the official upstream images (`ghcr.io/open-telemetry/demo:1.12.0-*`) until the CI pipeline has completed at least one successful build+push (see [CI: GitHub Actions](#ci-github-actions) — needs `DOCKERHUB_TOKEN` set). So the very first ArgoCD sync deploys the known-good upstream images; your own `adarshbarkunta/<service>` images only replace them once CI has actually verified they build and pushed successfully. Watch the Actions run to confirm each service builds before expecting to see your own images running.
+> **Image state**: verified working as of the deployment below — all 17 custom images build, push, and run correctly. See [Verified Live Deployment](#verified-live-deployment-eks--argocd) for the full record, including manifest bugs that had to be fixed to get there.
 
 ### 1. Install ArgoCD
 ```bash
 kubectl create namespace argocd
-kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argocd/stable/manifests/install.yaml
+kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml --server-side --force-conflicts
 kubectl get pods -n argocd
 kubectl edit svc argocd-server -n argocd    # change type: ClusterIP -> LoadBalancer
 kubectl get svc -n argocd                   # note the LoadBalancer external IP
 ```
+Note the repo is `argo-cd`, not `argocd` — a plain `kubectl apply` (without `--server-side`) on the same URL will also fail on the `applicationsets.argoproj.io` CRD ("metadata.annotations: Too long") because that CRD's rendered `last-applied-configuration` annotation exceeds Kubernetes' 256KB limit; `--server-side` avoids the annotation entirely.
 
 Get the initial admin password:
 ```bash
@@ -252,7 +253,55 @@ argocd app create opentelemetry-demo \
 ```
 
 ### 3. Access the app
-Change the `frontend-proxy` Service to `LoadBalancer` (either edit it directly with `kubectl edit svc frontend-proxy -n ms`, or update its `type:` in `deployment-service.yml` and let ArgoCD sync the change), then hit that LoadBalancer's external IP.
+`frontend-proxy`'s Service is already set to `type: LoadBalancer` in `deployment-service.yml` — ArgoCD provisions the ELB automatically on sync. Get its address with:
+```bash
+kubectl -n ms get svc opentelemetry-demo-frontendproxy
+# hit http://<EXTERNAL-IP or hostname>:8080
+```
+Don't `kubectl edit`/`kubectl patch` this Service directly — with `selfHeal: true` (set above), ArgoCD reverts any change that isn't committed to `deployment-service.yml` on the next reconcile. Change the `type:` (or anything else about it) in git instead.
 
 ### Observability (optional, separate ArgoCD app)
 `deployment-service.yml` does **not** include Prometheus/Grafana/Jaeger. To add them, create a second ArgoCD Application (Helm source) pointing at `https://open-telemetry.github.io/opentelemetry-helm-charts`, chart `opentelemetry-demo`, rather than running `helm install` by hand — keeps everything under ArgoCD.
+
+## Verified Live Deployment (EKS + ArgoCD)
+
+This full CI → Docker Hub → GitOps → ArgoCD → EKS pipeline has been run end-to-end and confirmed working: **all 19 pods `1/1 Running` with zero restarts, ArgoCD reporting `Synced / Healthy`, app reachable through the LoadBalancer.** Getting there surfaced a few real issues worth recording so they don't get re-discovered the hard way.
+
+### Instance type: what actually works on a free-tier-restricted AWS account
+Some AWS accounts (e.g. newer accounts under AWS's revamped free tier) reject any `eksctl create nodegroup` with a non-free-tier instance type outright (`InvalidParameterCombination - The specified instance type is not eligible for Free Tier`). If you hit that:
+- Check what your account actually allows: `aws ec2 describe-instance-types --filters "Name=free-tier-eligible,Values=true"` — the eligible list is broader than just `t2.micro`/`t3.micro`; it can include `t3.small`, `t4g.small`, `c7i-flex.large`, and **`m7i-flex.large`**.
+- **Avoid `t3.micro`/`t4g.micro` for this app.** They cap out at ~4 pods/node (EKS's max-pods is derived from ENI/IP capacity, and these instances barely have any), so even ArgoCD alone (7 pods) won't schedule across 2 nodes, let alone the full 19-pod app.
+- **`m7i-flex.large`** (2 vCPU, 8GB RAM, ~29 pods/node) is what this was actually deployed on and comfortably fits everything across 2 nodes.
+- The EKS control plane itself (~$0.10/hr) is **never** free-tier eligible, regardless of node instance type — factor that in either way.
+
+```bash
+eksctl create cluster \
+  --name otel-demo --region us-east-1 \
+  --nodegroup-name workers --node-type m7i-flex.large \
+  --nodes 2 --nodes-min 2 --nodes-max 3 --managed
+```
+
+### Manifest bugs found and fixed
+`deployment-service.yml` was a `helm template` export that had partially drifted from a newer chart's env-var naming convention (`<SERVICE>_SERVICE_<PORT|ADDR>`) while the actual service source in `src/` (consolidated from the original per-service branches) reads the plain `<SERVICE>_<PORT|ADDR>` form. This crashed 9 of the 17 custom-built services on first real deploy — confirmed one at a time via live pod logs, not guessed:
+
+| Service | Was | Fixed to | Symptom |
+|---|---|---|---|
+| accounting, checkout, fraud-detection | `KAFKA_SERVICE_ADDR` | `KAFKA_ADDR` | `KAFKA_ADDR is not supplied` / `ArgumentNullException` |
+| checkout | `CHECKOUT_SERVICE_PORT` + 6 `*_SERVICE_ADDR` vars | `CHECKOUT_PORT` + `*_ADDR` | `panic: environment variable "CHECKOUT_PORT" not set` |
+| currency | `CURRENCY_SERVICE_PORT` | `CURRENCY_PORT` | `Usage: currency <port>` |
+| payment | `PAYMENT_SERVICE_PORT` | `PAYMENT_PORT` | `Failed to parse DNS address dns:0.0.0.0:undefined` |
+| quote | `QUOTE_SERVICE_PORT` | `QUOTE_PORT` | `Invalid URI "tcp://0.0.0.0:"` |
+| recommendation | `RECOMMENDATION_SERVICE_PORT`, `PRODUCT_CATALOG_SERVICE_ADDR` | `RECOMMENDATION_PORT`, `PRODUCT_CATALOG_ADDR` | `PRODUCT_CATALOG_ADDR environment variable must be set` |
+| product-catalog | `PRODUCT_CATALOG_SERVICE_PORT` | `PRODUCT_CATALOG_PORT` | `Environment Variable Not Set: "PRODUCT_CATALOG_PORT"` |
+| shipping | `SHIPPING_SERVICE_PORT` | `SHIPPING_PORT` | `$SHIPPING_PORT is not set: NotPresent` |
+| ad | `AD_SERVICE_PORT` | `AD_PORT` | `IllegalStateException: environment vars: AD_PORT must not be null` |
+| frontendproxy | `GRAFANA_SERVICE_HOST/PORT`, `JAEGER_SERVICE_HOST/PORT` | `GRAFANA_HOST/PORT`, `JAEGER_HOST/PORT` | envoy config parse failure (unresolved `${GRAFANA_HOST}` template placeholder), immediate exit 1, no explicit error text |
+| frontend | `AD_SERVICE_ADDR`, `CHECKOUT_SERVICE_ADDR`, `RECOMMENDATION_SERVICE_ADDR` | `AD_ADDR`, `CHECKOUT_ADDR`, `RECOMMENDATION_ADDR` | didn't crash frontend itself, but its calls to those services would've failed |
+
+All of these are already fixed on `main` — this table is a record of what happened, not a to-do list. If a future `deployment-service.yml` regeneration reintroduces the `_SERVICE_` naming, this is the pattern to search for (`grep -n "name: .*_SERVICE_PORT\|name: .*_SERVICE_ADDR"`, then cross-check each against `.env`'s `<SERVICE>_PORT`/`<SERVICE>_ADDR` values — excluding `OTEL_SERVICE_NAME`/`WEB_OTEL_SERVICE_NAME`, which are correct as-is).
+
+### Cost reminder
+A live EKS cluster on `m7i-flex.large` nodes costs real money continuously (control plane + EC2, roughly a few dollars/day). Tear it down when not actively using it:
+```bash
+eksctl delete cluster --name otel-demo --region us-east-1
+```
