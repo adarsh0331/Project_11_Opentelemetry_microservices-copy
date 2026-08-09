@@ -1629,7 +1629,7 @@ spec:
       serviceAccountName: opentelemetry-demo
       containers:
         - name: recommendationservice
-          image: 'adarshbarkunta/recommendation:d2e502d8a80a3afa87e65673bad72b702dc26c4c'
+          image: 'adarshbarkunta/recommendation:9620fca48f4d3425d6a3dbab6b172fd822fe16bc'
           imagePullPolicy: IfNotPresent
           ports:
             
