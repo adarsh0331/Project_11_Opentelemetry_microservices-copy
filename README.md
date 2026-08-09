@@ -1,254 +1,87 @@
-# Micro Services Project
+# Micro Services Project — OpenTelemetry Astronomy Shop Demo
 
-## OpenTelemetry Astronomy Shop Demo
+A microservice-based e-commerce app (18 services, 7 languages) instrumented end-to-end with OpenTelemetry, deployed to EKS via ArgoCD (GitOps), with CI in GitHub Actions and Jenkins.
 
-This project contains the Open Telemetry Astronomy Shop, a microservice-based distributed system intended to illustrate the implementation of Open Telemetry in a near real-world environment.
+**Looking for what a specific file does?** → [EXPLANATION.md](EXPLANATION.md) catalogs every file in this repo.
+**Looking to deploy this?** → keep reading, it's a straight top-to-bottom walkthrough.
 
-### Project Goals
-- Provide a realistic example of a distributed system that can be used to demonstrate OpenTelemetry instrumentation and observability.
-- Build a base for vendors, tooling authors, and others to extend and demonstrate their OpenTelemetry integrations.
-- Create a living example for OpenTelemetry contributors to use for testing new versions of the API, SDK, and other components or enhancements.
+---
 
-
-### Supported Languages
-Open Telemetry supports many popular programming languages including:
-- Python
-- Java
-- JavaScript / Node.js
-- Go
-- .NET
-- Ruby
-- PHP
-
-## Micro Services Architecture
+## Architecture
 
 <img width="1166" height="1044" alt="image" src="https://github.com/user-attachments/assets/9ce5f0d0-c669-4a5a-a941-07c3937bed42" />
 
-This architecture illustrates a microservices-based e-commerce architecture using various communication protocols (mainly gRPC, HTTP, and TCP), and integrates tools like Kafka, Envoy, Valkey, and Flagd for key functionalities.
+18 services talking over gRPC (internal calls), HTTP (user-facing), and Kafka (async events). `frontend-proxy` (Envoy) is the single entry point, fanning out to `frontend` (web UI), `flagd-ui` (feature-flag admin), and `image-provider` (static assets). `checkout` is the central write-path service, calling `shipping`, `quote`, `email`, `currency`, `payment`, and `fraud-detection`, then publishing to Kafka for `accounting` and `fraud-detection` to consume asynchronously. `flagd` serves feature flags to `cart`, `checkout`, `fraud-detection`, and `payment`. Every service exports OpenTelemetry traces/metrics/logs to a central collector, which fans out to Jaeger (traces) and Prometheus (metrics), both visualized in Grafana.
 
-### Top Layer – Entry Points & Proxy
-- Internet, Load Generator, React Native App
-  - These represent external users or automated testing tools accessing the application via HTTP.
-- Frontend Proxy (Envoy)
-  - Acts as an API Gateway or Ingress Controller.
-  - Routes HTTP traffic to internal services like Frontend, Image Provider, and flagd-ui.
-  - Offers load balancing, routing, and security features.
+Full per-service breakdown (language, role, files): [EXPLANATION.md](EXPLANATION.md).
 
-### Frontend Layer
-- Frontend
-  - Serves the web UI and connects users with backend services.
-  - Communicates via gRPC to:
-    - Ad, Cart, Checkout, Currency, Recommendation, Product Catalog.
-- flagd-ui
-  - UI dashboard for feature flag management (likely connects to Flagd).
-- Image Provider (nginx)
-  - Serves static assets (e.g., product images).
+---
 
-### Core Services
-- Checkout
-  - Central service in the buying workflow.
-  - Communicates with:
-    - Shipping, Quote, Email, Currency, Payment, Fraud Detection, Flagd.
-- Cart
-  - Maintains user carts, backed by Cache (Valkey) and integrated with:
-    - Ad, Flagd.
-- Ad
-  - Provides ad content, possibly for recommendations or marketing.
-- Recommendation
-  - Suggests products to users based on various data points.
-  - Talks to Product Catalog.
-- Product Catalog
-  - Stores product details, connects to both Recommendation and Frontend.
+## Step-by-Step: Deploy This From Scratch
 
-### Supporting Services
-- Cache (Valkey)
-  - Used for caching (probably Redis-compatible like Valkey).
-  - Supports Cart and Ad.
-- queue (Kafka)
-  - Event streaming platform.
-  - Accepts messages from Checkout, passes them to:
-    - Accounting
-    - Fraud Detection
+Everything below assumes you're deploying to AWS EKS. Total time: ~30-40 minutes, most of it waiting on `eksctl`.
 
-### Backend Services
-- Accounting
-  - Processes financial data from Kafka.
-- Fraud Detection
-  - Analyzes data from Kafka to detect fraudulent activity.
-  - Also talks to Flagd.
-- Shipping
-  - Handles shipping details; communicates over HTTP and gRPC.
-- Quote
-  - Generates shipping or price quotes.
-- Email
-  - Sends confirmation and update emails.
-- Currency
-  - Converts prices to different currencies.
-- Payment
-  - Processes transactions, talks to Flagd.
+### Step 1 — Provision an EKS cluster
 
-### Feature Flagging
-- Flagd
-  - Central service managing feature flags.
-  - Communicated with by:
-    - Cart, Checkout, Fraud Detection, Payment.
+On an EC2 instance or any machine with outbound internet access and the AWS CLI configured:
 
-### Communication Types
-- gRPC – Used extensively for internal service-to-service calls (fast & efficient).
-- HTTP – Used for user-facing and REST-based services.
-- TCP – Used where event-streaming or lower-level connections are needed (Kafka, service queues).
-
-### Architecture Summary
-- Microservices based – each component handles a specific responsibility.
-- Event-driven – Kafka is used for decoupling & async processing.
-- Service Mesh / Proxy – Envoy acts as the API gateway.
-- Caching – via Valkey (Redis-like).
-- Observability & Feature Flags – via Flagd and possibly frontend telemetry.
-- Platform-Agnostic Access – UI via browser + mobile app (React Native).
-
-### Benefits
-- Unified approach to collecting metrics, logs, and traces.
-- Vendor-neutral and widely adopted.
-- Integrates easily with tools like Prometheus, Grafana, and Jaeger.
-- Supports both manual and automatic instrumentation.
-
-## Repository Layout
-
-This repo is a **monorepo**: every microservice lives under `src/<service>/` on `main`, each with its own `Dockerfile`. There are 18 services; 17 are built as custom images, and `flagd` runs from the upstream `ghcr.io/open-feature/flagd` image (only its config, `src/flagd/demo.flagd.json`, lives here).
-
-Two manifests at the repo root, both watched by ArgoCD:
-- **[deployment-service.yml](deployment-service.yml)** — the 18 app services (Deployments + Services).
-- **[observability.yml](observability.yml)** — the observability stack (OTel Collector, Jaeger, Prometheus, Grafana). See [Observability Stack](#observability-stack) below.
-
-## CI: GitHub Actions
-
-[.github/workflows/build-and-push.yml](.github/workflows/build-and-push.yml) is the primary CI pipeline. On every push to `main` that touches `src/**` (or via manual **Run workflow** dispatch, which builds all 17 services), it runs a matrix job **per changed service** with these stages:
-
-1. **Checkout** — `actions/checkout@v4`.
-2. **SonarQube Scan** — `SonarSource/sonarqube-scan-action`, scoped to that service's `src/<service>` dir. Wired against `SONAR_HOST_URL`/`SONAR_TOKEN` secrets; `continue-on-error: true` so it doesn't block the pipeline until a real server is configured.
-3. **Build & Push** — Buildx build using each service's own `context`/`dockerfile` pair (several — `cart`, `accounting` — have it nested a level deeper). Pushes `docker.io/adarshbarkunta/<service>:latest` and `:<git-sha>`, with GHA layer caching.
-4. **Trivy Vulnerability Scan** — scans the image just pushed; report-only (`exit-code: 0`, never blocks), results uploaded to the repo's **Security → Code scanning** tab.
-5. **Update deployment-service.yml** — rewrites that service's `image:` line to the newly pushed tag and commits/pushes back to `main` (GitOps). Since matrix jobs run in parallel, this step retries with a rebase on push conflicts.
-
-### Required repo secrets
-Set these under **Settings → Secrets and variables → Actions**:
-- `DOCKERHUB_USERNAME` — Docker Hub username/namespace images are pushed under. *(already set)*
-- `DOCKERHUB_TOKEN` — a Docker Hub [access token](https://hub.docker.com/settings/security) (not your account password).
-- `SONAR_HOST_URL` / `SONAR_TOKEN` — your SonarQube server URL and auth token. Until these are set, the scan step just no-ops.
-
-## CI: Jenkins (alternative)
-
-[Jenkinsfile](Jenkinsfile) implements the same five stages for a Jenkins pipeline job pointed at this repo's `main` branch. It auto-detects which `src/<service>` directories changed since the last commit (or accepts an explicit `SERVICES_OVERRIDE` build parameter) and loops through: SonarQube scan → Docker build & push → Trivy scan → `deployment-service.yml` update, per service. Sonar-scanner and Trivy run as Docker containers, so nothing extra needs installing on the Jenkins agent beyond Docker itself.
-
-Jenkins credentials required (**Manage Jenkins → Credentials**):
-- `docker-cred` (Username/password) — Docker Hub push access.
-- `github-cred` (Username/password: GitHub username + PAT with repo write access) — pushes the `deployment-service.yml` update back to `main`.
-- `sonar-token` (Secret text) — SonarQube auth token.
-
-And a `SONAR_HOST_URL` global environment variable (**Manage Jenkins → System**) pointing at your SonarQube server.
-
-## EKS setup using eksctl
-
-No Terraform, no separate infra repo — provisioning is a single `eksctl create cluster` command. This is exactly how the [Verified Live Deployment](#verified-live-deployment-eks--argocd) below was actually stood up.
-
-### Prerequisites (EC2, or any machine with outbound internet access)
 ```bash
-ssh -i your-key.pem ubuntu@your-ec2-ip
-```
-
-### aws cli:
-```bash
-sudo apt update
-sudo apt install unzip curl -y
+# aws cli
+sudo apt update && sudo apt install unzip curl -y
 curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
-unzip awscliv2.zip
-sudo ./aws/install
-aws --version
-```
+unzip awscliv2.zip && sudo ./aws/install
+aws configure   # access key, secret key, region, output format
 
-### kubectl installation:
-```bash
+# kubectl
 curl -LO "https://dl.k8s.io/release/$(curl -sSL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
-chmod +x kubectl
-sudo mv kubectl /usr/local/bin/
-kubectl version --client
-```
+chmod +x kubectl && sudo mv kubectl /usr/local/bin/
 
-### eksctl installation:
-```bash
+# eksctl
 curl -sSL "https://github.com/weaveworks/eksctl/releases/latest/download/eksctl_Linux_amd64.tar.gz" -o eksctl.tar.gz
-tar -xzf eksctl.tar.gz
-sudo mv eksctl /usr/local/bin/
-eksctl version
+tar -xzf eksctl.tar.gz && sudo mv eksctl /usr/local/bin/
 ```
 
-### AWS Configure
-Provide your AWS Access Key, Secret Key, region, and output format.
+Then create the cluster:
 
-### Provision the cluster
 ```bash
 eksctl create cluster \
   --name otel-demo \
   --region us-east-1 \
   --nodegroup-name workers \
   --node-type m7i-flex.large \
-  --nodes 2 \
-  --nodes-min 2 \
-  --nodes-max 3 \
+  --nodes 2 --nodes-min 2 --nodes-max 3 \
   --managed
 ```
-Takes ~15-20 minutes (control plane + managed node group). **Before picking `--node-type`, read [Instance type: what actually works on a free-tier-restricted AWS account](#instance-type-what-actually-works-on-a-free-tier-restricted-aws-account)** — `t3.micro`/`t3.medium` both failed for different reasons on the account this was built with; `m7i-flex.large` is what's actually verified working.
 
-### Check:
+Takes ~15-20 minutes. **`--node-type` matters — don't substitute a cheaper-looking instance without reading [why `m7i-flex.large`](#instance-type-what-actually-works-on-a-free-tier-restricted-aws-account) first**; `t3.micro` physically cannot schedule enough pods for this app regardless of node count.
+
+Verify:
 ```bash
 eksctl get cluster --region us-east-1
 kubectl get nodes
 ```
 
-### Tear down when done
-```bash
-eksctl delete cluster --name otel-demo --region us-east-1
-```
-The EKS control plane bills ~$0.10/hr regardless of node type — don't leave it running idle.
+### Step 2 — Install ArgoCD
 
-## CD: ArgoCD (only deployment path — points at this repo)
-
-This repo is the single source of truth ArgoCD watches. The GitOps loop is:
-
-**CI builds an image → CI commits the new tag into [deployment-service.yml](deployment-service.yml) on `main` → ArgoCD notices the commit and auto-syncs the cluster.**
-
-No manual `kubectl apply` and no `helm install` — ArgoCD is the only thing that ever touches the cluster.
-
-> **Image state**: verified working as of the deployment below — all 17 custom images build, push, and run correctly. See [Verified Live Deployment](#verified-live-deployment-eks--argocd) for the full record, including manifest bugs that had to be fixed to get there.
-
-### 1. Install ArgoCD
 ```bash
 kubectl create namespace argocd
 kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml --server-side --force-conflicts
-kubectl get pods -n argocd
+kubectl get pods -n argocd                  # wait until all Running
 kubectl edit svc argocd-server -n argocd    # change type: ClusterIP -> LoadBalancer
-kubectl get svc -n argocd                   # note the LoadBalancer external IP
+kubectl get svc -n argocd                   # note the LoadBalancer address
 ```
-Note the repo is `argo-cd`, not `argocd` — a plain `kubectl apply` (without `--server-side`) on the same URL will also fail on the `applicationsets.argoproj.io` CRD ("metadata.annotations: Too long") because that CRD's rendered `last-applied-configuration` annotation exceeds Kubernetes' 256KB limit; `--server-side` avoids the annotation entirely.
+`--server-side --force-conflicts` is required — a plain `kubectl apply` fails on the `applicationsets.argoproj.io` CRD because its rendered annotation exceeds Kubernetes' 256KB limit.
 
-Get the initial admin password:
+Get the admin password (username is `admin`):
 ```bash
 kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d
 ```
-Username: `admin`
 
-### 2. Create the Application (points at THIS repo)
-Via the Web UI (`http://<ARGOCD_LOADBALANCER_IP>`) or `argocd` CLI, create an app with:
-- **Application Name**: `opentelemetry-demo`
-- **Project**: `default`
-- **Repository URL**: `https://github.com/adarsh0331/Project_11_Opentelemetry_microservices-copy.git`
-- **Revision**: `HEAD` (tracks `main`)
-- **Path**: `.` (repo root — `deployment-service.yml` is the only manifest there)
-- **Cluster URL**: `https://kubernetes.default.svc`
-- **Namespace**: `ms`
-- **Sync Policy**: enable **Auto-Sync** (+ **Auto-Create Namespace**) — this is what makes CI's image-tag commits actually redeploy without you touching anything
+### Step 3 — Point ArgoCD at this repo
 
-Equivalent CLI form:
+This one Application deploys **both** manifests at once — `deployment-service.yml` (the app) and `observability.yml` (Jaeger/Prometheus/Grafana/OTel Collector) — because both live at the repo root and the Application's `path` is `.`.
+
+Via `argocd` CLI:
 ```bash
 argocd app create opentelemetry-demo \
   --repo https://github.com/adarsh0331/Project_11_Opentelemetry_microservices-copy.git \
@@ -259,67 +92,103 @@ argocd app create opentelemetry-demo \
   --sync-policy automated \
   --auto-prune --self-heal
 ```
+Or via the Web UI (`http://<ARGOCD_LOADBALANCER_ADDRESS>`): **New App** → Repository URL = the URL above, Revision = `HEAD`, Path = `.`, Cluster = `https://kubernetes.default.svc`, Namespace = `ms`, enable **Auto-Sync** + **Auto-Create Namespace**.
 
-### 3. Access the app
-`frontend-proxy`'s Service is already set to `type: LoadBalancer` in `deployment-service.yml` — ArgoCD provisions the ELB automatically on sync. Get its address with:
+Wait for it to sync:
+```bash
+kubectl -n ms get pods    # expect 23 pods, all 1/1 Running, within a couple minutes
+```
+
+> **No manual `kubectl apply`, no `helm install` — ArgoCD is the only thing that ever touches the cluster.** `selfHeal: true` means any live `kubectl edit` you make gets reverted on the next reconcile. Changes belong in git (`deployment-service.yml` / `observability.yml`), not `kubectl`.
+
+### Step 4 — Access the app
+
 ```bash
 kubectl -n ms get svc opentelemetry-demo-frontendproxy
 # hit http://<EXTERNAL-IP or hostname>:8080
 ```
-Don't `kubectl edit`/`kubectl patch` this Service directly — with `selfHeal: true` (set above), ArgoCD reverts any change that isn't committed to `deployment-service.yml` on the next reconcile. Change the `type:` (or anything else about it) in git instead.
 
-## Observability Stack
+### Step 5 — Access the observability tools
 
-[observability.yml](observability.yml) deploys OTel Collector, Jaeger, Prometheus, and Grafana into the same `ms` namespace, alongside the app — it's picked up automatically because the ArgoCD Application's `path: .` points at the whole repo root (no second Application needed). All 17 app services already send telemetry to `http://opentelemetry-demo-otelcol:4317` (see each Deployment's `OTEL_EXPORTER_OTLP_ENDPOINT` in `deployment-service.yml`), and `frontend-proxy` already expects `opentelemetry-demo-grafana` / `opentelemetry-demo-jaeger-query` to exist (`GRAFANA_HOST/PORT`, `JAEGER_HOST/PORT`) — this manifest just stands those names up.
-
-**Pipeline**: every service's traces/metrics/logs → OTel Collector (`otlp` receiver) → `memory_limiter`+`batch` processors →
-- traces → Jaeger (`otlp/jaeger` exporter) + `spanmetrics` connector (derives RED metrics from spans)
-- metrics (native + spanmetrics-derived) → Prometheus exporter on `:8889`
-- Prometheus scrapes the collector's `:8889` and itself
-- Grafana has both wired as datasources (Prometheus + Jaeger) via provisioning ConfigMap
-
-Image versions match `.env` exactly: `opentelemetry-collector-contrib:0.120.0`, `jaegertracing/all-in-one:1.66.0`, `quay.io/prometheus/prometheus:v3.2.0`, `grafana/grafana:11.5.2`. Deliberately a simpler collector config than upstream's current `main`-branch `otelcol-config.yml` — that one uses experimental "profiles" pipelines and Docker/Postgres/Redis receivers that don't apply to this K8s-only setup and may not exist in the older pinned collector image.
-
-### Accessing the UIs
-Jaeger and Grafana are reachable through the **same LoadBalancer `frontend-proxy` already uses** — no extra ELB needed. This works because `frontend-proxy`'s Envoy config ([src/frontend-proxy/envoy.tmpl.yaml](src/frontend-proxy/envoy.tmpl.yaml)) already ships with `/jaeger` and `/grafana` routes built in, and `deployment-service.yml` already points `JAEGER_HOST`/`GRAFANA_HOST` at the right Service names:
+Jaeger and Grafana are reachable through the **same LoadBalancer** as the app — no extra cost, they're pre-wired into `frontend-proxy`'s routing table:
 ```
-http://<frontend-proxy-LB-address>:8080/jaeger
-http://<frontend-proxy-LB-address>:8080/grafana
+http://<same-LB-address-as-step-4>:8080/jaeger
+http://<same-LB-address-as-step-4>:8080/grafana
 ```
-Getting these two actually working (not just returning a 200 on the index page) required telling each app it's mounted under a subpath — otherwise the index HTML loads but every JS/CSS asset request 404s:
-- **Jaeger**: `QUERY_BASE_PATH=/jaeger` env var — Jaeger's UI `<base href>` defaults to `/` and only reflects the real mount point if the query service is told about it.
-- **Grafana**: `GF_SERVER_SERVE_FROM_SUB_PATH=true` + `GF_SERVER_ROOT_URL=%(protocol)s://%(domain)s:8080/grafana/` — without these it 404s on anything outside its own root.
-
-**Prometheus** has no route in `envoy.tmpl.yaml` (upstream never added one — it's meant to be queried via Grafana, not browsed directly), so it stays internal-only. Reach it with:
+Prometheus has no route through the proxy (by upstream design — it's meant to be queried via Grafana), so reach it with a tunnel instead:
 ```bash
 kubectl -n ms port-forward svc/opentelemetry-demo-prometheus 9090:9090   # http://localhost:9090
 ```
 
-### Verified working end-to-end (not just "pods are Running")
-- `kubectl -n ms exec deploy/opentelemetry-demo-jaeger -- wget -qO- http://localhost:16686/api/services` returned real traced services: `frontendproxy`, `frontend-web`, `cartservice`, `adservice`, `frontend`, `shippingservice`, `imageprovider`, `checkoutservice`, `recommendationservice`.
-- `kubectl -n ms exec deploy/opentelemetry-demo-prometheus -- wget -qO- http://localhost:9090/api/v1/targets` showed both scrape targets (`otel-collector`, `prometheus`) `up`.
-- `kubectl -n ms exec deploy/opentelemetry-demo-grafana -- wget -qO- http://admin:admin@localhost:3000/api/datasources` showed both `Jaeger` and `Prometheus` datasources registered with the correct in-cluster URLs.
+### Step 6 — (Optional) Turn on CI so future commits deploy automatically
 
-## Verified Live Deployment (EKS + ArgoCD)
+Right now the cluster is running whatever's already committed in `deployment-service.yml`. To make `git push` → new image → auto-redeploy actually happen, set up one of the two CI pipelines below (GitHub Actions or Jenkins) — see [CI Pipelines](#ci-pipelines).
 
-This full CI → Docker Hub → GitOps → ArgoCD → EKS pipeline has been run end-to-end and confirmed working: **all 23 pods `1/1 Running` with zero restarts (19 app + 4 observability), ArgoCD reporting `Synced / Healthy`, app reachable through the LoadBalancer, traces/metrics/dashboards confirmed flowing.** Getting there surfaced a few real issues worth recording so they don't get re-discovered the hard way.
-
-### Instance type: what actually works on a free-tier-restricted AWS account
-Some AWS accounts (e.g. newer accounts under AWS's revamped free tier) reject any `eksctl create nodegroup` with a non-free-tier instance type outright (`InvalidParameterCombination - The specified instance type is not eligible for Free Tier`). If you hit that:
-- Check what your account actually allows: `aws ec2 describe-instance-types --filters "Name=free-tier-eligible,Values=true"` — the eligible list is broader than just `t2.micro`/`t3.micro`; it can include `t3.small`, `t4g.small`, `c7i-flex.large`, and **`m7i-flex.large`**.
-- **Avoid `t3.micro`/`t4g.micro` for this app.** They cap out at ~4 pods/node (EKS's max-pods is derived from ENI/IP capacity, and these instances barely have any), so even ArgoCD alone (7 pods) won't schedule across 2 nodes, let alone the full 19-pod app.
-- **`m7i-flex.large`** (2 vCPU, 8GB RAM, ~29 pods/node) is what this was actually deployed on and comfortably fits everything across 2 nodes.
-- The EKS control plane itself (~$0.10/hr) is **never** free-tier eligible, regardless of node instance type — factor that in either way.
+### Step 7 — Tear down when you're done
 
 ```bash
-eksctl create cluster \
-  --name otel-demo --region us-east-1 \
-  --nodegroup-name workers --node-type m7i-flex.large \
-  --nodes 2 --nodes-min 2 --nodes-max 3 --managed
+eksctl delete cluster --name otel-demo --region us-east-1
 ```
+The EKS control plane bills ~$0.10/hr regardless of node type, and `m7i-flex.large` nodes add more on top — don't leave this running idle.
+
+---
+
+## CI Pipelines
+
+Two independent, equivalent pipelines — use whichever fits your setup. Both do the same five things: checkout → SonarQube scan → Docker build & push → Trivy scan → commit the new image tag into `deployment-service.yml` (which ArgoCD then picks up automatically).
+
+### GitHub Actions
+
+[.github/workflows/build-and-push.yml](.github/workflows/build-and-push.yml) runs on every push to `main` that touches `src/**` (or via manual **Run workflow** dispatch, which builds all 17 services). One matrix job per changed service.
+
+Required repo secrets (**Settings → Secrets and variables → Actions**):
+- `DOCKERHUB_USERNAME` / `DOCKERHUB_TOKEN` — Docker Hub push access ([access token](https://hub.docker.com/settings/security), not your password).
+- `SONAR_HOST_URL` / `SONAR_TOKEN` — until set, the scan step just no-ops (`continue-on-error: true`).
+
+### Jenkins (alternative)
+
+[Jenkinsfile](Jenkinsfile) implements the same stages for a Jenkins pipeline job pointed at `main`. Auto-detects changed `src/<service>` directories (or accepts an explicit `SERVICES_OVERRIDE` build parameter). SonarQube and Trivy run as Docker containers, so nothing extra needs installing on the agent beyond Docker itself.
+
+Jenkins credentials required (**Manage Jenkins → Credentials**):
+- `docker-cred` (Username/password) — Docker Hub push access.
+- `github-cred` (Username/password: GitHub username + PAT with repo write access) — pushes the manifest update.
+- `sonar-token` (Secret text) — SonarQube auth token.
+
+Plus a `SONAR_HOST_URL` global environment variable (**Manage Jenkins → System**).
+
+---
+
+## Operating This Deployment
+
+### Rolling back a single service's image
+`deployment-service.yml` is the source of truth, so a rollback happens in git, not `kubectl`: edit that service's `image:` line back to a known-good tag (Docker Hub keeps every `:<git-sha>` tag CI ever pushed — check `docker.io/adarshbarkunta/<service>/tags`), commit, push. ArgoCD picks it up on the next auto-sync, or force it immediately:
+```bash
+kubectl -n argocd patch application opentelemetry-demo --type merge -p '{"operation":{"sync":{"revision":"HEAD"}}}'
+```
+Example already done in this repo's history: `frontend` was rolled back from a bad build to the last verified-healthy tag this way.
+
+### Observability stack details
+[observability.yml](observability.yml) wires: every service's OTLP telemetry → OTel Collector → (`memory_limiter` + `batch` processors) → Jaeger (traces) + `spanmetrics` connector (derives RED metrics from spans) → Prometheus (scrapes the collector) → Grafana (both wired as datasources). Image versions are pinned to match `.env` exactly. The collector config is deliberately simpler than upstream's current `main`-branch version, which uses experimental "profiles" pipelines and receivers (Docker/Postgres/Redis) that don't apply to this K8s-only setup.
+
+Getting Jaeger/Grafana working through the shared LoadBalancer (Step 5 above) required telling each app it's mounted under a subpath, not root — otherwise the index page loads but every asset request 404s:
+- Jaeger: `QUERY_BASE_PATH=/jaeger` env var.
+- Grafana: `GF_SERVER_SERVE_FROM_SUB_PATH=true` + `GF_SERVER_ROOT_URL=%(protocol)s://%(domain)s:8080/grafana/`.
+
+---
+
+## Verified Live Deployment (reference / troubleshooting log)
+
+This full CI → Docker Hub → GitOps → ArgoCD → EKS pipeline has been run end-to-end and confirmed working: all 23 pods `1/1 Running`, zero restarts, ArgoCD `Synced / Healthy`, app + Jaeger + Grafana reachable through the LoadBalancer, traces/metrics confirmed flowing. Getting there surfaced real issues, recorded here so they don't get re-discovered the hard way.
+
+### Instance type: what actually works on a free-tier-restricted AWS account
+Some AWS accounts reject any `eksctl create nodegroup` with a non-free-tier instance type outright (`InvalidParameterCombination - not eligible for Free Tier`). If you hit that:
+- Check what your account actually allows: `aws ec2 describe-instance-types --filters "Name=free-tier-eligible,Values=true"` — the eligible list is broader than `t2.micro`/`t3.micro`; it can include `t3.small`, `t4g.small`, `c7i-flex.large`, and **`m7i-flex.large`**.
+- **Avoid `t3.micro`/`t4g.micro` for this app.** They cap out at ~4 pods/node (EKS's max-pods is derived from ENI/IP capacity, not CPU/memory), so even ArgoCD alone (7 pods) won't schedule across 2 nodes.
+- **`m7i-flex.large`** (2 vCPU, 8GB RAM, ~29 pods/node) is what this was actually deployed on and comfortably fits all 23 pods across 2 nodes.
+- The EKS control plane itself (~$0.10/hr) is never free-tier eligible, regardless of node type.
 
 ### Manifest bugs found and fixed
-`deployment-service.yml` was a `helm template` export that had partially drifted from a newer chart's env-var naming convention (`<SERVICE>_SERVICE_<PORT|ADDR>`) while the actual service source in `src/` (consolidated from the original per-service branches) reads the plain `<SERVICE>_<PORT|ADDR>` form. This crashed 9 of the 17 custom-built services on first real deploy — confirmed one at a time via live pod logs, not guessed:
+`deployment-service.yml` was a `helm template` export that had partially drifted from a newer chart's env-var naming convention (`<SERVICE>_SERVICE_<PORT|ADDR>`) while the actual service source in `src/` reads the plain `<SERVICE>_<PORT|ADDR>` form (confirmed against `.env`). This crashed 9 of 17 custom services on first real deploy — diagnosed one at a time via live pod logs:
 
 | Service | Was | Fixed to | Symptom |
 |---|---|---|---|
@@ -332,16 +201,18 @@ eksctl create cluster \
 | product-catalog | `PRODUCT_CATALOG_SERVICE_PORT` | `PRODUCT_CATALOG_PORT` | `Environment Variable Not Set: "PRODUCT_CATALOG_PORT"` |
 | shipping | `SHIPPING_SERVICE_PORT` | `SHIPPING_PORT` | `$SHIPPING_PORT is not set: NotPresent` |
 | ad | `AD_SERVICE_PORT` | `AD_PORT` | `IllegalStateException: environment vars: AD_PORT must not be null` |
-| frontendproxy | `GRAFANA_SERVICE_HOST/PORT`, `JAEGER_SERVICE_HOST/PORT` | `GRAFANA_HOST/PORT`, `JAEGER_HOST/PORT` | envoy config parse failure (unresolved `${GRAFANA_HOST}` template placeholder), immediate exit 1, no explicit error text |
-| frontend | `AD_SERVICE_ADDR`, `CHECKOUT_SERVICE_ADDR`, `RECOMMENDATION_SERVICE_ADDR` | `AD_ADDR`, `CHECKOUT_ADDR`, `RECOMMENDATION_ADDR` | didn't crash frontend itself, but its calls to those services would've failed |
+| frontendproxy | `GRAFANA_SERVICE_HOST/PORT`, `JAEGER_SERVICE_HOST/PORT` | `GRAFANA_HOST/PORT`, `JAEGER_HOST/PORT` | envoy config parse failure, immediate exit 1 |
+| frontend | `AD_SERVICE_ADDR`, `CHECKOUT_SERVICE_ADDR`, `RECOMMENDATION_SERVICE_ADDR` | `AD_ADDR`, `CHECKOUT_ADDR`, `RECOMMENDATION_ADDR` | didn't crash frontend itself, but calls to those services would've failed |
 
-All of these are already fixed on `main` — this table is a record of what happened, not a to-do list. If a future `deployment-service.yml` regeneration reintroduces the `_SERVICE_` naming, this is the pattern to search for (`grep -n "name: .*_SERVICE_PORT\|name: .*_SERVICE_ADDR"`, then cross-check each against `.env`'s `<SERVICE>_PORT`/`<SERVICE>_ADDR` values — excluding `OTEL_SERVICE_NAME`/`WEB_OTEL_SERVICE_NAME`, which are correct as-is).
+All already fixed on `main` — this table is a record, not a to-do list. If a future `deployment-service.yml` regeneration reintroduces `_SERVICE_` naming: `grep -n "name: .*_SERVICE_PORT\|name: .*_SERVICE_ADDR"`, cross-check each against `.env`'s convention (excluding `OTEL_SERVICE_NAME`/`WEB_OTEL_SERVICE_NAME`, which are correct as-is).
 
 ### loadgenerator OOMKilled under sustained load
-After ~50 minutes of continuous load, `loadgenerator` was killed (exit code 137) — its `resources.limits.memory` of `1500Mi` wasn't enough once Locust had accumulated enough in-memory stats. Fixed by raising the limit to `3000Mi` in `deployment-service.yml`.
+After ~50 minutes of continuous load, `loadgenerator` was OOMKilled — `1500Mi` wasn't enough once Locust had accumulated enough in-memory stats. Fixed: raised to `3000Mi`.
 
-### Rolling back a single service's image
-Because `deployment-service.yml` is the source of truth and ArgoCD's `selfHeal: true` will silently revert any live `kubectl edit`, a rollback has to happen in git: edit that service's `image:` line back to a known-good tag (Docker Hub keeps every `:<git-sha>` tag CI ever pushed, so pick one from `docker.io/adarshbarkunta/<service>/tags`), commit, push — ArgoCD picks it up on the next sync (or force it immediately: `kubectl -n argocd patch application opentelemetry-demo --type merge -p '{"operation":{"sync":{"revision":"HEAD"}}}'`). Example done here: `frontend` was rolled back from `8691229...` to the last verified-healthy `b29ffee...` this way.
+### Observability stack OOM-crash-looping under sustained load
+Two separate issues surfaced after the observability stack had been running under continuous `loadgenerator` traffic for a while:
+- **OTel Collector & Jaeger OOMKilled** — 300Mi/500Mi limits were too low, and the collector's `memory_limiter` was configured with `limit_percentage` (relative to the *node's* total memory — useless against a much smaller container cgroup limit that gets hit first). Fixed: switched to absolute `limit_mib`/`spike_limit_mib` below the container limit, and raised both containers' limits (otelcol → 512Mi, Jaeger → 1000Mi + capped its in-memory trace storage to 50k traces via `MEMORY_MAX_TRACES`).
+- **Prometheus OOM-crash-looping** (8 restarts in under an hour, worsening each time) — root cause was `resource_to_telemetry_conversion.enabled: true` on the collector's Prometheus exporter, which promotes *every* OTLP resource attribute into a Prometheus label on every metric. Under continuous varying traffic this caused unbounded time-series cardinality growth. Fixed: disabled that setting (not needed for the RED-metric dashboards this stack supports) and gave Prometheus headroom (1000Mi → 1500Mi) to recover cleanly.
 
 ### Cost reminder
 A live EKS cluster on `m7i-flex.large` nodes costs real money continuously (control plane + EC2, roughly a few dollars/day). Tear it down when not actively using it:
