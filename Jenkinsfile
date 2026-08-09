@@ -104,7 +104,7 @@ pipeline {
                                       -e SONAR_TOKEN=${SONAR_TOKEN} \
                                       -v ${WORKSPACE}/${cfg.context}:/usr/src \
                                       sonarsource/sonar-scanner-cli \
-                                      -Dsonar.projectKey=otel-demo-${svc} -Dsonar.sources=.
+                                      -Dsonar.projectKey=otel-demo-${svc} -Dsonar.sources=. -Dsonar.java.binaries=.
                                 """
                             }
                         }

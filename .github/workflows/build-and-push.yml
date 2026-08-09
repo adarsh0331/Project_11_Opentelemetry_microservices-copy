@@ -143,6 +143,7 @@ jobs:
           args: >
             -Dsonar.projectKey=otel-demo-${{ matrix.service }}
             -Dsonar.sources=.
+            -Dsonar.java.binaries=.
 
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
