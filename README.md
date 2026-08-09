@@ -116,6 +116,10 @@ This architecture illustrates a microservices-based e-commerce architecture usin
 
 This repo is a **monorepo**: every microservice lives under `src/<service>/` on `main`, each with its own `Dockerfile`. There are 18 services; 17 are built as custom images, and `flagd` runs from the upstream `ghcr.io/open-feature/flagd` image (only its config, `src/flagd/demo.flagd.json`, lives here).
 
+Two manifests at the repo root, both watched by ArgoCD:
+- **[deployment-service.yml](deployment-service.yml)** — the 18 app services (Deployments + Services).
+- **[observability.yml](observability.yml)** — the observability stack (OTel Collector, Jaeger, Prometheus, Grafana). See [Observability Stack](#observability-stack) below.
+
 ## CI: GitHub Actions
 
 [.github/workflows/build-and-push.yml](.github/workflows/build-and-push.yml) is the primary CI pipeline. On every push to `main` that touches `src/**` (or via manual **Run workflow** dispatch, which builds all 17 services), it runs a matrix job **per changed service** with these stages:
@@ -264,12 +268,34 @@ kubectl -n ms get svc opentelemetry-demo-frontendproxy
 ```
 Don't `kubectl edit`/`kubectl patch` this Service directly — with `selfHeal: true` (set above), ArgoCD reverts any change that isn't committed to `deployment-service.yml` on the next reconcile. Change the `type:` (or anything else about it) in git instead.
 
-### Observability (optional, separate ArgoCD app)
-`deployment-service.yml` does **not** include Prometheus/Grafana/Jaeger. To add them, create a second ArgoCD Application (Helm source) pointing at `https://open-telemetry.github.io/opentelemetry-helm-charts`, chart `opentelemetry-demo`, rather than running `helm install` by hand — keeps everything under ArgoCD.
+## Observability Stack
+
+[observability.yml](observability.yml) deploys OTel Collector, Jaeger, Prometheus, and Grafana into the same `ms` namespace, alongside the app — it's picked up automatically because the ArgoCD Application's `path: .` points at the whole repo root (no second Application needed). All 17 app services already send telemetry to `http://opentelemetry-demo-otelcol:4317` (see each Deployment's `OTEL_EXPORTER_OTLP_ENDPOINT` in `deployment-service.yml`), and `frontend-proxy` already expects `opentelemetry-demo-grafana` / `opentelemetry-demo-jaeger-query` to exist (`GRAFANA_HOST/PORT`, `JAEGER_HOST/PORT`) — this manifest just stands those names up.
+
+**Pipeline**: every service's traces/metrics/logs → OTel Collector (`otlp` receiver) → `memory_limiter`+`batch` processors →
+- traces → Jaeger (`otlp/jaeger` exporter) + `spanmetrics` connector (derives RED metrics from spans)
+- metrics (native + spanmetrics-derived) → Prometheus exporter on `:8889`
+- Prometheus scrapes the collector's `:8889` and itself
+- Grafana has both wired as datasources (Prometheus + Jaeger) via provisioning ConfigMap
+
+Image versions match `.env` exactly: `opentelemetry-collector-contrib:0.120.0`, `jaegertracing/all-in-one:1.66.0`, `quay.io/prometheus/prometheus:v3.2.0`, `grafana/grafana:11.5.2`. Deliberately a simpler collector config than upstream's current `main`-branch `otelcol-config.yml` — that one uses experimental "profiles" pipelines and Docker/Postgres/Redis receivers that don't apply to this K8s-only setup and may not exist in the older pinned collector image.
+
+### Accessing the UIs
+None of the three are on the LoadBalancer (kept internal to avoid extra ELB cost) — reach them with `kubectl port-forward`:
+```bash
+kubectl -n ms port-forward svc/opentelemetry-demo-grafana 3000:80        # http://localhost:3000  (admin/admin, or anonymous-admin is enabled)
+kubectl -n ms port-forward svc/opentelemetry-demo-jaeger-query 16686:16686  # http://localhost:16686
+kubectl -n ms port-forward svc/opentelemetry-demo-prometheus 9090:9090   # http://localhost:9090
+```
+
+### Verified working end-to-end (not just "pods are Running")
+- `kubectl -n ms exec deploy/opentelemetry-demo-jaeger -- wget -qO- http://localhost:16686/api/services` returned real traced services: `frontendproxy`, `frontend-web`, `cartservice`, `adservice`, `frontend`, `shippingservice`, `imageprovider`, `checkoutservice`, `recommendationservice`.
+- `kubectl -n ms exec deploy/opentelemetry-demo-prometheus -- wget -qO- http://localhost:9090/api/v1/targets` showed both scrape targets (`otel-collector`, `prometheus`) `up`.
+- `kubectl -n ms exec deploy/opentelemetry-demo-grafana -- wget -qO- http://admin:admin@localhost:3000/api/datasources` showed both `Jaeger` and `Prometheus` datasources registered with the correct in-cluster URLs.
 
 ## Verified Live Deployment (EKS + ArgoCD)
 
-This full CI → Docker Hub → GitOps → ArgoCD → EKS pipeline has been run end-to-end and confirmed working: **all 19 pods `1/1 Running` with zero restarts, ArgoCD reporting `Synced / Healthy`, app reachable through the LoadBalancer.** Getting there surfaced a few real issues worth recording so they don't get re-discovered the hard way.
+This full CI → Docker Hub → GitOps → ArgoCD → EKS pipeline has been run end-to-end and confirmed working: **all 23 pods `1/1 Running` with zero restarts (19 app + 4 observability), ArgoCD reporting `Synced / Healthy`, app reachable through the LoadBalancer, traces/metrics/dashboards confirmed flowing.** Getting there surfaced a few real issues worth recording so they don't get re-discovered the hard way.
 
 ### Instance type: what actually works on a free-tier-restricted AWS account
 Some AWS accounts (e.g. newer accounts under AWS's revamped free tier) reject any `eksctl create nodegroup` with a non-free-tier instance type outright (`InvalidParameterCombination - The specified instance type is not eligible for Free Tier`). If you hit that:
@@ -303,6 +329,12 @@ eksctl create cluster \
 | frontend | `AD_SERVICE_ADDR`, `CHECKOUT_SERVICE_ADDR`, `RECOMMENDATION_SERVICE_ADDR` | `AD_ADDR`, `CHECKOUT_ADDR`, `RECOMMENDATION_ADDR` | didn't crash frontend itself, but its calls to those services would've failed |
 
 All of these are already fixed on `main` — this table is a record of what happened, not a to-do list. If a future `deployment-service.yml` regeneration reintroduces the `_SERVICE_` naming, this is the pattern to search for (`grep -n "name: .*_SERVICE_PORT\|name: .*_SERVICE_ADDR"`, then cross-check each against `.env`'s `<SERVICE>_PORT`/`<SERVICE>_ADDR` values — excluding `OTEL_SERVICE_NAME`/`WEB_OTEL_SERVICE_NAME`, which are correct as-is).
+
+### loadgenerator OOMKilled under sustained load
+After ~50 minutes of continuous load, `loadgenerator` was killed (exit code 137) — its `resources.limits.memory` of `1500Mi` wasn't enough once Locust had accumulated enough in-memory stats. Fixed by raising the limit to `3000Mi` in `deployment-service.yml`.
+
+### Rolling back a single service's image
+Because `deployment-service.yml` is the source of truth and ArgoCD's `selfHeal: true` will silently revert any live `kubectl edit`, a rollback has to happen in git: edit that service's `image:` line back to a known-good tag (Docker Hub keeps every `:<git-sha>` tag CI ever pushed, so pick one from `docker.io/adarshbarkunta/<service>/tags`), commit, push — ArgoCD picks it up on the next sync (or force it immediately: `kubectl -n argocd patch application opentelemetry-demo --type merge -p '{"operation":{"sync":{"revision":"HEAD"}}}'`). Example done here: `frontend` was rolled back from `8691229...` to the last verified-healthy `b29ffee...` this way.
 
 ### Cost reminder
 A live EKS cluster on `m7i-flex.large` nodes costs real money continuously (control plane + EC2, roughly a few dollars/day). Tear it down when not actively using it:
