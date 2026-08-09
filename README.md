@@ -281,10 +281,17 @@ Don't `kubectl edit`/`kubectl patch` this Service directly — with `selfHeal: t
 Image versions match `.env` exactly: `opentelemetry-collector-contrib:0.120.0`, `jaegertracing/all-in-one:1.66.0`, `quay.io/prometheus/prometheus:v3.2.0`, `grafana/grafana:11.5.2`. Deliberately a simpler collector config than upstream's current `main`-branch `otelcol-config.yml` — that one uses experimental "profiles" pipelines and Docker/Postgres/Redis receivers that don't apply to this K8s-only setup and may not exist in the older pinned collector image.
 
 ### Accessing the UIs
-None of the three are on the LoadBalancer (kept internal to avoid extra ELB cost) — reach them with `kubectl port-forward`:
+Jaeger and Grafana are reachable through the **same LoadBalancer `frontend-proxy` already uses** — no extra ELB needed. This works because `frontend-proxy`'s Envoy config ([src/frontend-proxy/envoy.tmpl.yaml](src/frontend-proxy/envoy.tmpl.yaml)) already ships with `/jaeger` and `/grafana` routes built in, and `deployment-service.yml` already points `JAEGER_HOST`/`GRAFANA_HOST` at the right Service names:
+```
+http://<frontend-proxy-LB-address>:8080/jaeger
+http://<frontend-proxy-LB-address>:8080/grafana
+```
+Getting these two actually working (not just returning a 200 on the index page) required telling each app it's mounted under a subpath — otherwise the index HTML loads but every JS/CSS asset request 404s:
+- **Jaeger**: `QUERY_BASE_PATH=/jaeger` env var — Jaeger's UI `<base href>` defaults to `/` and only reflects the real mount point if the query service is told about it.
+- **Grafana**: `GF_SERVER_SERVE_FROM_SUB_PATH=true` + `GF_SERVER_ROOT_URL=%(protocol)s://%(domain)s:8080/grafana/` — without these it 404s on anything outside its own root.
+
+**Prometheus** has no route in `envoy.tmpl.yaml` (upstream never added one — it's meant to be queried via Grafana, not browsed directly), so it stays internal-only. Reach it with:
 ```bash
-kubectl -n ms port-forward svc/opentelemetry-demo-grafana 3000:80        # http://localhost:3000  (admin/admin, or anonymous-admin is enabled)
-kubectl -n ms port-forward svc/opentelemetry-demo-jaeger-query 16686:16686  # http://localhost:16686
 kubectl -n ms port-forward svc/opentelemetry-demo-prometheus 9090:9090   # http://localhost:9090
 ```
 
