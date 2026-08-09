@@ -1696,7 +1696,7 @@ spec:
       serviceAccountName: opentelemetry-demo
       containers:
         - name: shippingservice
-          image: 'adarshbarkunta/shipping:b29ffeefd8f8f26d35d79facf5232d17450e73c2'
+          image: 'adarshbarkunta/shipping:8691229b8d442f588fa8adb25b5727c56f2f960a'
           imagePullPolicy: IfNotPresent
           ports:
             
