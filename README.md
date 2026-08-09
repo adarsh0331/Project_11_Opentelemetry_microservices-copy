@@ -17,7 +17,79 @@ Full per-service breakdown (language, role, files): [EXPLANATION.md](EXPLANATION
 
 ---
 
-## Step-by-Step: Deploy This From Scratch
+## CI Pipelines
+
+Two independent, equivalent pipelines — use whichever fits your setup.
+
+### GitHub Actions
+
+[.github/workflows/build-and-push.yml](.github/workflows/build-and-push.yml) runs on every push to `main` that touches `src/**` (or via manual **Run workflow** dispatch, which builds all 17 services regardless of what changed).
+
+**Job structure — this is why the Actions UI looks like it's "just" `changes` + `build`:** GitHub Actions only shows *jobs* as top-level rows on a run's summary page. This workflow has exactly two jobs — `changes` (detects which services touched `src/**`) and `build` (one instance per changed service, run in parallel as a matrix). SonarQube, Trivy, and the manifest update are **steps inside each `build (<service>)` job**, not separate jobs — click into any `build (<service>)` row to see them. In execution order, per service:
+
+| # | Step | What it does |
+|---|---|---|
+| 1 | Checkout | `actions/checkout@v4` |
+| 2 | **SonarQube Scan** | `sonar-scanner` against the self-hosted server below, `continue-on-error: true` (report-only) |
+| 3 | Docker Buildx setup | `setup-qemu-action` + `setup-buildx-action` |
+| 4 | Docker Hub Login | `docker/login-action` |
+| 5 | **Build & Push** | builds that service's image, pushes `:latest` + `:<git-sha>` to Docker Hub |
+| 6 | **Trivy Vulnerability Scan** | scans the image just pushed, `exit-code: 0` (report-only) |
+| 7 | Upload Trivy results | SARIF → repo's **Security → Code scanning** tab |
+| 8 | **Update deployment-service.yml** | rewrites that service's `image:` line, commits + pushes to `main` (GitOps — ArgoCD picks this up automatically) |
+
+Required repo secrets (**Settings → Secrets and variables → Actions**):
+- `DOCKERHUB_USERNAME` / `DOCKERHUB_TOKEN` — Docker Hub push access ([access token](https://hub.docker.com/settings/security), not your password).
+- `SONAR_HOST_URL` / `SONAR_TOKEN` — already set, pointing at the self-hosted SonarQube server below. `continue-on-error: true` keeps this report-only regardless.
+
+### SonarQube server (self-hosted, EC2)
+SonarQube Community Edition runs as a single Docker container on its own EC2 instance (`sonarqube-server`, `m7i-flex.large`, tag `Name=sonarqube-server`) — kept off the EKS cluster deliberately since the cluster was already at 63-70% memory and SonarQube's Elasticsearch-backed indexer wants 2GB+ of headroom on its own.
+
+```bash
+# provisioned via SSM (no SSH key needed) - to check on it:
+aws ssm start-session --target <instance-id> --region us-east-1
+
+# the container itself:
+docker ps                 # container name: sonarqube, port 9000
+docker logs sonarqube
+```
+Bootstrap did three things beyond `docker run sonarqube:lts-community`: bumped `vm.max_map_count` (Elasticsearch bootstrap check requirement), rotated the default `admin/admin` password on first boot via the REST API, and generated a CI token — both stored only in the `SONAR_TOKEN` GitHub secret, never committed.
+
+Each service scans as its own project, keyed `otel-demo-<service>` (matching the `-Dsonar.projectKey` arg in the workflow) — browse them at `http://<instance-public-ip>:9000`. One gotcha specific to this setup: CI runs `sonar-scanner` directly against source, without a full compile step first, so Java services with raw `.java` files (only `ad`; `fraud-detection` is Kotlin and unaffected) need `-Dsonar.java.binaries=.` supplied as a placeholder or the scan hard-fails with `AnalysisException: ... please provide compiled classes`. Already added to both pipelines' scan args.
+
+> **Security note**: the instance's security group allows `9000`/`22` from `0.0.0.0/0` for demo convenience, matching this repo's other public endpoints (ArgoCD, frontend LB). Restrict to your IP if this stops being a throwaway demo. Costs the same as an EKS worker node (~$0.10/hr on `m7i-flex.large`) — terminate it when not in use: `aws ec2 terminate-instances --instance-ids <instance-id> --region us-east-1`.
+
+### Jenkins (alternative)
+
+[Jenkinsfile](Jenkinsfile) implements the same pipeline for a Jenkins job pointed at `main`. Unlike GitHub Actions, Jenkins' Blue Ocean / stage view shows every stage below by name directly — no clicking into a job to find them. Top-level stages, in order:
+
+| # | Stage | What it does |
+|---|---|---|
+| 1 | `Checkout` | pulls `main` |
+| 2 | `Detect Changed Services` | diffs `src/<service>` dirs since the last commit, or uses the explicit `SERVICES_OVERRIDE` build parameter |
+| 3 | `Build, Scan & Deploy Services` | parent stage; per changed service, runs the four nested stages below |
+
+Nested per-service, repeated for each detected service:
+
+| # | Stage | What it does |
+|---|---|---|
+| 3a | `SonarQube: <service>` | `sonar-scanner` container against the self-hosted server below (`catchError` keeps it report-only) |
+| 3b | `Build & Push: <service>` | `docker build` + push via `withDockerRegistry` |
+| 3c | `Trivy Scan: <service>` | Trivy container scan |
+| 3d | `Update Manifest: <service>` | rewrites `deployment-service.yml`'s `image:` line, commits + pushes to `main` |
+
+SonarQube and Trivy run as Docker containers, so nothing extra needs installing on the agent beyond Docker itself.
+
+Jenkins credentials required (**Manage Jenkins → Credentials**):
+- `docker-cred` (Username/password) — Docker Hub push access.
+- `github-cred` (Username/password: GitHub username + PAT with repo write access) — pushes the manifest update.
+- `sonar-token` (Secret text) — SonarQube auth token.
+
+Plus a `SONAR_HOST_URL` global environment variable (**Manage Jenkins → System**).
+
+---
+
+## Step-by-Step: Deploy This From Scratch (CD)
 
 Everything below assumes you're deploying to AWS EKS. Total time: ~30-40 minutes, most of it waiting on `eksctl`.
 
@@ -122,7 +194,7 @@ kubectl -n ms port-forward svc/opentelemetry-demo-prometheus 9090:9090   # http:
 
 ### Step 6 — (Optional) Turn on CI so future commits deploy automatically
 
-Right now the cluster is running whatever's already committed in `deployment-service.yml`. To make `git push` → new image → auto-redeploy actually happen, set up one of the two CI pipelines below (GitHub Actions or Jenkins) — see [CI Pipelines](#ci-pipelines).
+Right now the cluster is running whatever's already committed in `deployment-service.yml`. To make `git push` → new image → auto-redeploy actually happen, set up one of the two CI pipelines documented above (GitHub Actions or Jenkins) — see [CI Pipelines](#ci-pipelines).
 
 ### Step 7 — Tear down when you're done
 
@@ -130,78 +202,6 @@ Right now the cluster is running whatever's already committed in `deployment-ser
 eksctl delete cluster --name otel-demo --region us-east-1
 ```
 The EKS control plane bills ~$0.10/hr regardless of node type, and `m7i-flex.large` nodes add more on top — don't leave this running idle.
-
----
-
-## CI Pipelines
-
-Two independent, equivalent pipelines — use whichever fits your setup.
-
-### GitHub Actions
-
-[.github/workflows/build-and-push.yml](.github/workflows/build-and-push.yml) runs on every push to `main` that touches `src/**` (or via manual **Run workflow** dispatch, which builds all 17 services regardless of what changed).
-
-**Job structure — this is why the Actions UI looks like it's "just" `changes` + `build`:** GitHub Actions only shows *jobs* as top-level rows on a run's summary page. This workflow has exactly two jobs — `changes` (detects which services touched `src/**`) and `build` (one instance per changed service, run in parallel as a matrix). SonarQube, Trivy, and the manifest update are **steps inside each `build (<service>)` job**, not separate jobs — click into any `build (<service>)` row to see them. In execution order, per service:
-
-| # | Step | What it does |
-|---|---|---|
-| 1 | Checkout | `actions/checkout@v4` |
-| 2 | **SonarQube Scan** | `sonar-scanner` against the self-hosted server below, `continue-on-error: true` (report-only) |
-| 3 | Docker Buildx setup | `setup-qemu-action` + `setup-buildx-action` |
-| 4 | Docker Hub Login | `docker/login-action` |
-| 5 | **Build & Push** | builds that service's image, pushes `:latest` + `:<git-sha>` to Docker Hub |
-| 6 | **Trivy Vulnerability Scan** | scans the image just pushed, `exit-code: 0` (report-only) |
-| 7 | Upload Trivy results | SARIF → repo's **Security → Code scanning** tab |
-| 8 | **Update deployment-service.yml** | rewrites that service's `image:` line, commits + pushes to `main` (GitOps — ArgoCD picks this up automatically) |
-
-Required repo secrets (**Settings → Secrets and variables → Actions**):
-- `DOCKERHUB_USERNAME` / `DOCKERHUB_TOKEN` — Docker Hub push access ([access token](https://hub.docker.com/settings/security), not your password).
-- `SONAR_HOST_URL` / `SONAR_TOKEN` — already set, pointing at the self-hosted SonarQube server below. `continue-on-error: true` keeps this report-only regardless.
-
-### SonarQube server (self-hosted, EC2)
-SonarQube Community Edition runs as a single Docker container on its own EC2 instance (`sonarqube-server`, `m7i-flex.large`, tag `Name=sonarqube-server`) — kept off the EKS cluster deliberately since the cluster was already at 63-70% memory and SonarQube's Elasticsearch-backed indexer wants 2GB+ of headroom on its own.
-
-```bash
-# provisioned via SSM (no SSH key needed) - to check on it:
-aws ssm start-session --target <instance-id> --region us-east-1
-
-# the container itself:
-docker ps                 # container name: sonarqube, port 9000
-docker logs sonarqube
-```
-Bootstrap did three things beyond `docker run sonarqube:lts-community`: bumped `vm.max_map_count` (Elasticsearch bootstrap check requirement), rotated the default `admin/admin` password on first boot via the REST API, and generated a CI token — both stored only in the `SONAR_TOKEN` GitHub secret, never committed.
-
-Each service scans as its own project, keyed `otel-demo-<service>` (matching the `-Dsonar.projectKey` arg in the workflow) — browse them at `http://<instance-public-ip>:9000`. One gotcha specific to this setup: CI runs `sonar-scanner` directly against source, without a full compile step first, so Java services with raw `.java` files (only `ad`; `fraud-detection` is Kotlin and unaffected) need `-Dsonar.java.binaries=.` supplied as a placeholder or the scan hard-fails with `AnalysisException: ... please provide compiled classes`. Already added to both pipelines' scan args.
-
-> **Security note**: the instance's security group allows `9000`/`22` from `0.0.0.0/0` for demo convenience, matching this repo's other public endpoints (ArgoCD, frontend LB). Restrict to your IP if this stops being a throwaway demo. Costs the same as an EKS worker node (~$0.10/hr on `m7i-flex.large`) — terminate it when not in use: `aws ec2 terminate-instances --instance-ids <instance-id> --region us-east-1`.
-
-### Jenkins (alternative)
-
-[Jenkinsfile](Jenkinsfile) implements the same pipeline for a Jenkins job pointed at `main`. Unlike GitHub Actions, Jenkins' Blue Ocean / stage view shows every stage below by name directly — no clicking into a job to find them. Top-level stages, in order:
-
-| # | Stage | What it does |
-|---|---|---|
-| 1 | `Checkout` | pulls `main` |
-| 2 | `Detect Changed Services` | diffs `src/<service>` dirs since the last commit, or uses the explicit `SERVICES_OVERRIDE` build parameter |
-| 3 | `Build, Scan & Deploy Services` | parent stage; per changed service, runs the four nested stages below |
-
-Nested per-service, repeated for each detected service:
-
-| # | Stage | What it does |
-|---|---|---|
-| 3a | `SonarQube: <service>` | `sonar-scanner` container against the self-hosted server below (`catchError` keeps it report-only) |
-| 3b | `Build & Push: <service>` | `docker build` + push via `withDockerRegistry` |
-| 3c | `Trivy Scan: <service>` | Trivy container scan |
-| 3d | `Update Manifest: <service>` | rewrites `deployment-service.yml`'s `image:` line, commits + pushes to `main` |
-
-SonarQube and Trivy run as Docker containers, so nothing extra needs installing on the agent beyond Docker itself.
-
-Jenkins credentials required (**Manage Jenkins → Credentials**):
-- `docker-cred` (Username/password) — Docker Hub push access.
-- `github-cred` (Username/password: GitHub username + PAT with repo write access) — pushes the manifest update.
-- `sonar-token` (Secret text) — SonarQube auth token.
-
-Plus a `SONAR_HOST_URL` global environment variable (**Manage Jenkins → System**).
 
 ---
 
