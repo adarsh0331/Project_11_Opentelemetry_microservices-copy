@@ -143,22 +143,11 @@ Jenkins credentials required (**Manage Jenkins → Credentials**):
 
 And a `SONAR_HOST_URL` global environment variable (**Manage Jenkins → System**) pointing at your SonarQube server.
 
-## Eks setup in Ubuntu server using Terraform
+## EKS setup using eksctl
 
-Terraform code Repository URL: 
-https://github.com/adarsh0331/Project_10_Eks_Cluster_with_terraform.git
+No Terraform, no separate infra repo — provisioning is a single `eksctl create cluster` command. This is exactly how the [Verified Live Deployment](#verified-live-deployment-eks--argocd) below was actually stood up.
 
-Complete terraform files to create EKS in AWS VPC is available in the eks-install folder of this repo. This includes remote backend and statelocking implementation as well.
-
-- eks-install: Folder that holds the complete terraform hcl files.
-- backend: Folder that holds hcl files for s3 bucket and dynamodb creation.
-- modules: Terraform Modules for VPC and EKS.
-- main.tf: Main file that invokes the modules to create EKS in VPC.
-- variables.tf: Variables for main.tf
-- Jenkinfile: Jenkins file to trigger pipeline
-- outputs.tf: Output values you wish to see post terraform execution, For example - VPC ID.
-
-### Connect to your provisioning EC2 server
+### Prerequisites (EC2, or any machine with outbound internet access)
 ```bash
 ssh -i your-key.pem ubuntu@your-ec2-ip
 ```
@@ -178,7 +167,7 @@ aws --version
 curl -LO "https://dl.k8s.io/release/$(curl -sSL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
 chmod +x kubectl
 sudo mv kubectl /usr/local/bin/
-kubectl version –client
+kubectl version --client
 ```
 
 ### eksctl installation:
@@ -193,15 +182,30 @@ eksctl version
 Provide your AWS Access Key, Secret Key, region, and output format.
 
 ### Provision the cluster
-From the `eks-install` folder of the [Terraform repo](https://github.com/adarsh0331/Project_10_Eks_Cluster_with_terraform.git):
 ```bash
-terraform init
-terraform apply
+eksctl create cluster \
+  --name otel-demo \
+  --region us-east-1 \
+  --nodegroup-name workers \
+  --node-type m7i-flex.large \
+  --nodes 2 \
+  --nodes-min 2 \
+  --nodes-max 3 \
+  --managed
 ```
+Takes ~15-20 minutes (control plane + managed node group). **Before picking `--node-type`, read [Instance type: what actually works on a free-tier-restricted AWS account](#instance-type-what-actually-works-on-a-free-tier-restricted-aws-account)** — `t3.micro`/`t3.medium` both failed for different reasons on the account this was built with; `m7i-flex.large` is what's actually verified working.
 
 ### Check:
-- EKS cluster in AWS Console
-- Nodes are in Ready state
+```bash
+eksctl get cluster --region us-east-1
+kubectl get nodes
+```
+
+### Tear down when done
+```bash
+eksctl delete cluster --name otel-demo --region us-east-1
+```
+The EKS control plane bills ~$0.10/hr regardless of node type — don't leave it running idle.
 
 ## CD: ArgoCD (only deployment path — points at this repo)
 
