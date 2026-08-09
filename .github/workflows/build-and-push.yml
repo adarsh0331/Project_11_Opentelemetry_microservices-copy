@@ -130,11 +130,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # Wired against standard env vars so this activates the moment SONAR_HOST_URL/SONAR_TOKEN
-      # secrets are added; continue-on-error keeps the pipeline green until then (per team decision:
-      # report-only, don't block on a server that doesn't exist yet).
+      # Scans against the self-hosted SonarQube server (EC2, see README). continue-on-error keeps
+      # this report-only, matching the Trivy step below, rather than blocking pushes on findings.
       - name: SonarQube Scan
-        uses: SonarSource/sonarqube-scan-action@v4
+        uses: SonarSource/sonarqube-scan-action@v6
         continue-on-error: true
         env:
           SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
